@@ -25,7 +25,7 @@ let wakeWordActive = false;
 
 const INPUT_SAMPLE_RATE = 16000;
 const OUTPUT_SAMPLE_RATE = 24000;
-const WAKE_PHRASE = "computer";
+const WAKE_PHRASE = "sonic";
 const SILENCE_TIMEOUT_MS = 10000; // end session after 10s of silence
 
 // ── Wake Word Detection (Web Speech API) ──
@@ -93,7 +93,7 @@ function startWakeWordListening() {
     wakeWordActive = true;
     micBtn.classList.remove("active");
     micBtn.classList.add("listening");
-    statusEl.textContent = 'Listening for "Computer"...';
+    statusEl.textContent = 'Listening for "Sonic"...';
     try {
         wakeWordRecognition.start();
     } catch (e) {
