@@ -5,6 +5,7 @@ const path = require("path");
 const {
     BedrockRuntimeClient,
     InvokeModelWithBidirectionalStreamCommand,
+    ConverseCommand,
 } = require("@aws-sdk/client-bedrock-runtime");
 const { NodeHttp2Handler } = require("@smithy/node-http-handler");
 const { fromIni } = require("@aws-sdk/credential-provider-ini");
@@ -18,7 +19,88 @@ app.use(express.static(path.join(__dirname, "public")));
 
 const REGION = process.env.AWS_REGION || "us-east-1";
 const MODEL_ID = "amazon.nova-sonic-v1:0";
+const GROUNDING_MODEL_ID = process.env.GROUNDING_MODEL_ID || "us.amazon.nova-premier-v1:0";
 const VOICE_ID = process.env.VOICE_ID || "tiffany";
+
+// Tool definition that Nova Sonic will use to request web lookups
+const WEB_SEARCH_TOOL = {
+    toolSpec: {
+        name: "web_search",
+        description:
+            "Search the web for current, real-time information. Use this tool when the user asks about recent events, news, weather, stock prices, sports scores, or any topic that requires up-to-date information beyond your training data.",
+        inputSchema: {
+            json: JSON.stringify({
+                type: "object",
+                properties: {
+                    query: {
+                        type: "string",
+                        description: "The search query to look up on the web",
+                    },
+                },
+                required: ["query"],
+            }),
+        },
+    },
+};
+
+// Perform web grounding via Nova's built-in nova_grounding system tool (Converse API)
+async function performWebGrounding(query, bedrockClient) {
+    try {
+        const command = new ConverseCommand({
+            modelId: GROUNDING_MODEL_ID,
+            messages: [
+                {
+                    role: "user",
+                    content: [{ text: query }],
+                },
+            ],
+            toolConfig: {
+                tools: [
+                    {
+                        systemTool: {
+                            name: "nova_grounding",
+                        },
+                    },
+                ],
+            },
+        });
+
+        const response = await bedrockClient.send(command);
+        const contentList = response.output?.message?.content || [];
+
+        let text = "";
+        const citations = [];
+
+        for (const block of contentList) {
+            if (block.text) {
+                text += block.text;
+            }
+            if (block.citationsContent?.citations) {
+                for (const citation of block.citationsContent.citations) {
+                    if (citation.location?.web) {
+                        citations.push({
+                            url: citation.location.web.url,
+                            domain: citation.location.web.domain || "",
+                        });
+                    }
+                }
+            }
+        }
+
+        return {
+            query,
+            summary: text || "No results found.",
+            citations,
+        };
+    } catch (err) {
+        console.error("Web grounding error:", err.message);
+        return {
+            query,
+            summary: `Web grounding search failed: ${err.message}`,
+            citations: [],
+        };
+    }
+}
 
 function createBedrockClient() {
     const handler = new NodeHttp2Handler({
@@ -35,6 +117,14 @@ function createBedrockClient() {
     });
 }
 
+// Separate client for Converse API calls (nova_grounding) — uses default HTTPS handler
+function createConverseClient() {
+    return new BedrockRuntimeClient({
+        region: REGION,
+        credentials: fromIni({ profile: "uoc" }),
+    });
+}
+
 function randomId() {
     return crypto.randomUUID();
 }
@@ -43,13 +133,13 @@ wss.on("connection", (ws) => {
     console.log("Client connected");
 
     let bedrockClient = createBedrockClient();
+    let converseClient = createConverseClient();
     let isActive = false;
     let promptName = randomId();
     let contentName = randomId();
     let audioContentName = randomId();
     let inputResolve = null;
     let inputQueue = [];
-    let streamDone = false;
 
     // Generator that yields events to Bedrock
     async function* generateEvents() {
@@ -91,6 +181,13 @@ wss.on("connection", (ws) => {
                                     encoding: "base64",
                                     audioType: "SPEECH",
                                 },
+                                toolUseOutputConfiguration: {
+                                    mediaType: "application/json",
+                                },
+                                toolConfiguration: {
+                                    tools: [WEB_SEARCH_TOOL],
+                                    toolChoice: { auto: {} },
+                                },
                             },
                         },
                     })
@@ -129,7 +226,7 @@ wss.on("connection", (ws) => {
                                 promptName,
                                 contentName,
                                 content:
-                                    "You are a friendly assistant. The user and you will engage in a spoken dialog exchanging the transcripts of a natural real-time conversation. Keep your responses short, generally two or three sentences for chatty scenarios.",
+                                    "You are a friendly assistant with web search capabilities. The user and you will engage in a spoken dialog exchanging the transcripts of a natural real-time conversation. Keep your responses short, generally two or three sentences for chatty scenarios. When the user asks about current events, news, weather, real-time information, or anything you're unsure about, use the web_search tool to look it up. Always mention your sources briefly when using search results.",
                             },
                         },
                     })
@@ -287,6 +384,106 @@ wss.on("connection", (ws) => {
                             const content = json.event.textOutput.content;
                             if (ws.readyState === WebSocket.OPEN) {
                                 ws.send(JSON.stringify({ type: "text", role, content }));
+                            }
+                        } else if (json.event?.toolUse) {
+                            // Model wants to use a tool
+                            const toolName = json.event.toolUse.toolName;
+                            const toolUseId = json.event.toolUse.toolUseId;
+                            const toolContent = json.event.toolUse.content;
+                            console.log(`Tool use requested: ${toolName}`, toolContent);
+
+                            if (ws.readyState === WebSocket.OPEN) {
+                                ws.send(
+                                    JSON.stringify({
+                                        type: "tool_use",
+                                        toolName,
+                                        content: toolContent,
+                                    })
+                                );
+                            }
+
+                            if (toolName === "web_search") {
+                                try {
+                                    const params = JSON.parse(toolContent);
+                                    const groundingResult = await performWebGrounding(params.query, converseClient);
+                                    console.log(`Grounding results for "${params.query}":`, groundingResult.citations.length, "citations");
+
+                                    // Send grounding results to client for display
+                                    if (ws.readyState === WebSocket.OPEN) {
+                                        ws.send(
+                                            JSON.stringify({
+                                                type: "search_results",
+                                                query: params.query,
+                                                summary: groundingResult.summary,
+                                                citations: groundingResult.citations,
+                                            })
+                                        );
+                                    }
+
+                                    // Send tool result back to Nova Sonic
+                                    const toolResultContentName = randomId();
+
+                                    // contentStart for tool result
+                                    pushInput({
+                                        chunk: {
+                                            bytes: Buffer.from(
+                                                JSON.stringify({
+                                                    event: {
+                                                        contentStart: {
+                                                            promptName,
+                                                            contentName: toolResultContentName,
+                                                            interactive: false,
+                                                            type: "TOOL",
+                                                            role: "TOOL",
+                                                            toolResultInputConfiguration: {
+                                                                toolUseId,
+                                                                type: "TEXT",
+                                                                textInputConfiguration: {
+                                                                    mediaType: "text/plain",
+                                                                },
+                                                            },
+                                                        },
+                                                    },
+                                                })
+                                            ),
+                                        },
+                                    });
+
+                                    // tool result content
+                                    pushInput({
+                                        chunk: {
+                                            bytes: Buffer.from(
+                                                JSON.stringify({
+                                                    event: {
+                                                        toolResult: {
+                                                            promptName,
+                                                            contentName: toolResultContentName,
+                                                            content: JSON.stringify(groundingResult),
+                                                        },
+                                                    },
+                                                })
+                                            ),
+                                        },
+                                    });
+
+                                    // contentEnd for tool result
+                                    pushInput({
+                                        chunk: {
+                                            bytes: Buffer.from(
+                                                JSON.stringify({
+                                                    event: {
+                                                        contentEnd: {
+                                                            promptName,
+                                                            contentName: toolResultContentName,
+                                                        },
+                                                    },
+                                                })
+                                            ),
+                                        },
+                                    });
+                                } catch (toolErr) {
+                                    console.error("Tool execution error:", toolErr);
+                                }
                             }
                         } else if (json.event?.contentStart) {
                             // Could track role changes here

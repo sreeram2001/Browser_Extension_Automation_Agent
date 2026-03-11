@@ -207,6 +207,12 @@ async function startRecording() {
             } else if (msg.type === "text") {
                 resetSilenceTimer();
                 addTranscript(msg.role, msg.content);
+            } else if (msg.type === "tool_use") {
+                resetSilenceTimer();
+                addSystemMessage(`🔍 Searching the web...`);
+            } else if (msg.type === "search_results") {
+                resetSilenceTimer();
+                addSearchResults(msg.query, msg.summary, msg.citations);
             } else if (msg.type === "error") {
                 statusEl.textContent = `Error: ${msg.message}`;
             } else if (msg.type === "session_end") {
@@ -308,6 +314,26 @@ function addSystemMessage(text) {
     const div = document.createElement("div");
     div.className = "msg system";
     div.textContent = text;
+    transcriptEl.appendChild(div);
+    transcriptEl.scrollTop = transcriptEl.scrollHeight;
+}
+
+function addSearchResults(query, summary, citations) {
+    const div = document.createElement("div");
+    div.className = "msg search-results";
+
+    let html = `<span class="label">🌐 Web Grounding</span>`;
+    if (citations && citations.length > 0) {
+        html += `<div class="citations">`;
+        const uniqueUrls = [...new Map(citations.map((c) => [c.url, c])).values()];
+        uniqueUrls.forEach((c) => {
+            const domain = c.domain || new URL(c.url).hostname;
+            html += `<a href="${escapeHtml(c.url)}" target="_blank" rel="noopener" class="citation-link">${escapeHtml(domain)}</a>`;
+        });
+        html += `</div>`;
+    }
+
+    div.innerHTML = html;
     transcriptEl.appendChild(div);
     transcriptEl.scrollTop = transcriptEl.scrollHeight;
 }
