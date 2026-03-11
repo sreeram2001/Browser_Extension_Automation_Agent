@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Nova Sonic — Voice Chat</title>
+    <title>Nova Sonic — Voice Assistant</title>
     <style>
         * {
             margin: 0;
@@ -40,8 +40,15 @@
 
         .subtitle {
             color: #888;
-            margin-bottom: 2rem;
+            margin-bottom: 0.5rem;
             font-size: 0.9rem;
+        }
+
+        .wake-word-hint {
+            color: #667eea;
+            font-size: 0.85rem;
+            margin-bottom: 2rem;
+            opacity: 0.8;
         }
 
         #mic-btn {
@@ -58,17 +65,36 @@
             align-items: center;
             justify-content: center;
             margin: 0 auto 2rem;
-            position: relative;
         }
 
         #mic-btn:hover {
             border-color: #667eea;
         }
 
+        /* Listening for wake word */
+        #mic-btn.listening {
+            border-color: #f39c12;
+            color: #f39c12;
+            animation: breathe 3s ease-in-out infinite;
+        }
+
+        /* Active conversation */
         #mic-btn.active {
             border-color: #e74c3c;
             color: #e74c3c;
             animation: pulse 1.5s infinite;
+        }
+
+        @keyframes breathe {
+
+            0%,
+            100% {
+                box-shadow: 0 0 0 0 rgba(243, 156, 18, 0.2);
+            }
+
+            50% {
+                box-shadow: 0 0 0 15px rgba(243, 156, 18, 0);
+            }
         }
 
         @keyframes pulse {
@@ -121,6 +147,12 @@
             color: #a0d995;
         }
 
+        .msg.system {
+            color: #f39c12;
+            font-style: italic;
+            font-size: 0.85rem;
+        }
+
         .msg .label {
             font-weight: 600;
             font-size: 0.8rem;
@@ -147,8 +179,21 @@
             height: 4px;
         }
 
-        #mic-btn.active~.visualizer .bar {
-            animation: barAnim 0.5s ease-in-out infinite alternate;
+        #enable-btn {
+            padding: 0.8rem 2rem;
+            font-size: 1.1rem;
+            border-radius: 30px;
+            border: 2px solid #667eea;
+            background: transparent;
+            color: #667eea;
+            cursor: pointer;
+            margin-bottom: 2rem;
+            transition: all 0.3s ease;
+        }
+
+        #enable-btn:hover {
+            background: #667eea;
+            color: #fff;
         }
     </style>
 </head>
@@ -156,13 +201,16 @@
 <body>
     <div class="container">
         <h1>Nova Sonic</h1>
-        <p class="subtitle">Audio-to-audio conversation powered by Amazon Nova Sonic</p>
+        <p class="subtitle">Voice assistant powered by Amazon Nova Sonic</p>
+        <p class="wake-word-hint">Say "Computer" to start, or click the mic</p>
 
-        <button id="mic-btn" aria-label="Toggle microphone">🎙️</button>
+        <button id="enable-btn" aria-label="Enable voice assistant">🔊 Enable Voice Assistant</button>
+
+        <button id="mic-btn" aria-label="Toggle microphone" style="display:none;">🎙️</button>
 
         <div class="visualizer" id="visualizer"></div>
 
-        <p id="status">Click the mic to start talking</p>
+        <p id="status">Click the button above to enable the voice assistant</p>
 
         <div id="transcript" role="log" aria-live="polite"></div>
     </div>

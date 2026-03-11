@@ -11,6 +11,7 @@ for (let i = 0; i < 20; i++) {
 }
 const bars = visualizerEl.querySelectorAll(".bar");
 
+// ── State ──
 let ws = null;
 let mediaStream = null;
 let audioContext = null;
@@ -18,20 +19,131 @@ let processorNode = null;
 let isRecording = false;
 let playbackContext = null;
 let nextPlayTime = 0;
+let silenceTimer = null;
+let wakeWordRecognition = null;
+let wakeWordActive = false;
 
-// Audio config matching Nova Sonic expectations
 const INPUT_SAMPLE_RATE = 16000;
 const OUTPUT_SAMPLE_RATE = 24000;
+const WAKE_PHRASE = "computer";
+const SILENCE_TIMEOUT_MS = 10000; // end session after 10s of silence
 
-micBtn.addEventListener("click", toggleRecording);
+// ── Wake Word Detection (Web Speech API) ──
 
-async function toggleRecording() {
+function initWakeWord() {
+    const SpeechRecognition =
+        window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+        statusEl.textContent =
+            "Wake word not supported in this browser. Use the mic button.";
+        return;
+    }
+
+    wakeWordRecognition = new SpeechRecognition();
+    wakeWordRecognition.continuous = true;
+    wakeWordRecognition.interimResults = true;
+    wakeWordRecognition.lang = "en-US";
+
+    wakeWordRecognition.onresult = (event) => {
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+            const transcript = event.results[i][0].transcript.toLowerCase().trim();
+            console.log("[Wake word] Heard:", transcript);
+
+            const variations = [WAKE_PHRASE];
+            const matched = variations.some((v) => transcript.includes(v));
+            console.log(matched)
+
+            if (matched) {
+                console.log("Wake word detected:", transcript);
+                addSystemMessage("Wake word detected!");
+                stopWakeWordListening();
+                startRecording();
+                return;
+            }
+        }
+    };
+
+    wakeWordRecognition.onerror = (event) => {
+        console.warn("[Wake word] Error:", event.error);
+        // Restart on recoverable errors
+        if (event.error === "no-speech" || event.error === "aborted" || event.error === "network") {
+            if (wakeWordActive && !isRecording) {
+                setTimeout(() => {
+                    try { wakeWordRecognition.start(); } catch (e) { }
+                }, 300);
+            }
+        }
+    };
+
+    wakeWordRecognition.onend = () => {
+        // Auto-restart if we're still in listening mode
+        if (wakeWordActive && !isRecording) {
+            try {
+                wakeWordRecognition.start();
+            } catch (e) {
+                // already started
+            }
+        }
+    };
+}
+
+function startWakeWordListening() {
+    if (!wakeWordRecognition) return;
+    wakeWordActive = true;
+    micBtn.classList.remove("active");
+    micBtn.classList.add("listening");
+    statusEl.textContent = 'Listening for "Computer"...';
+    try {
+        wakeWordRecognition.start();
+    } catch (e) {
+        // already running
+    }
+}
+
+function stopWakeWordListening() {
+    wakeWordActive = false;
+    micBtn.classList.remove("listening");
+    if (wakeWordRecognition) {
+        try {
+            wakeWordRecognition.stop();
+        } catch (e) {
+            // not running
+        }
+    }
+}
+
+// ── Silence Detection ──
+
+function resetSilenceTimer() {
+    if (silenceTimer) clearTimeout(silenceTimer);
+    silenceTimer = setTimeout(() => {
+        if (isRecording) {
+            addSystemMessage("Agent stopped.");
+            stopRecording();
+        }
+    }, SILENCE_TIMEOUT_MS);
+}
+
+function clearSilenceTimer() {
+    if (silenceTimer) {
+        clearTimeout(silenceTimer);
+        silenceTimer = null;
+    }
+}
+
+// ── Mic Button ──
+
+micBtn.addEventListener("click", () => {
     if (isRecording) {
         stopRecording();
     } else {
-        await startRecording();
+        stopWakeWordListening();
+        startRecording();
     }
-}
+});
+
+// ── Recording (Nova Sonic session) ──
 
 async function startRecording() {
     try {
@@ -46,19 +158,14 @@ async function startRecording() {
             },
         });
 
-        // Set up AudioContext for capture
         audioContext = new AudioContext({ sampleRate: INPUT_SAMPLE_RATE });
         const source = audioContext.createMediaStreamSource(mediaStream);
-
-        // Use ScriptProcessorNode (widely supported) for capturing raw PCM
         const bufferSize = 2048;
         processorNode = audioContext.createScriptProcessor(bufferSize, 1, 1);
 
-        // Set up playback context
         playbackContext = new AudioContext({ sampleRate: OUTPUT_SAMPLE_RATE });
         nextPlayTime = 0;
 
-        // Connect WebSocket
         const protocol = location.protocol === "https:" ? "wss:" : "ws:";
         ws = new WebSocket(`${protocol}//${location.host}`);
 
@@ -66,20 +173,27 @@ async function startRecording() {
             statusEl.textContent = "Connected. Speak now...";
             ws.send(JSON.stringify({ type: "start" }));
 
-            // Start sending audio
             source.connect(processorNode);
             processorNode.connect(audioContext.destination);
+
+            // Start silence timer
+            resetSilenceTimer();
 
             processorNode.onaudioprocess = (e) => {
                 if (!isRecording || !ws || ws.readyState !== WebSocket.OPEN) return;
 
                 const float32 = e.inputBuffer.getChannelData(0);
+
+                // Check if there's actual audio (not silence)
+                let rms = 0;
+                for (let i = 0; i < float32.length; i++) rms += float32[i] * float32[i];
+                rms = Math.sqrt(rms / float32.length);
+                if (rms > 0.01) resetSilenceTimer(); // voice detected, reset timer
+
                 const int16 = float32ToInt16(float32);
                 const base64 = arrayBufferToBase64(int16.buffer);
-
                 ws.send(JSON.stringify({ type: "audio", data: base64 }));
 
-                // Update visualizer
                 updateVisualizer(float32);
             };
         };
@@ -88,8 +202,10 @@ async function startRecording() {
             const msg = JSON.parse(event.data);
 
             if (msg.type === "audio") {
+                resetSilenceTimer(); // model is responding, keep alive
                 playAudio(msg.data);
             } else if (msg.type === "text") {
+                resetSilenceTimer();
                 addTranscript(msg.role, msg.content);
             } else if (msg.type === "error") {
                 statusEl.textContent = `Error: ${msg.message}`;
@@ -107,19 +223,20 @@ async function startRecording() {
         };
 
         isRecording = true;
+        micBtn.classList.remove("listening");
         micBtn.classList.add("active");
     } catch (err) {
         statusEl.textContent = `Mic error: ${err.message}`;
         console.error(err);
+        startWakeWordListening();
     }
 }
 
 function stopRecording() {
     isRecording = false;
     micBtn.classList.remove("active");
-    statusEl.textContent = "Click the mic to start talking";
+    clearSilenceTimer();
 
-    // Reset visualizer
     bars.forEach((b) => (b.style.height = "4px"));
 
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -140,7 +257,12 @@ function stopRecording() {
         mediaStream.getTracks().forEach((t) => t.stop());
         mediaStream = null;
     }
+
+    // Go back to wake word listening
+    startWakeWordListening();
 }
+
+// ── Audio Playback ──
 
 function playAudio(base64Data) {
     if (!playbackContext) return;
@@ -149,12 +271,9 @@ function playAudio(base64Data) {
     const bytes = new Uint8Array(raw.length);
     for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
 
-    // Convert Int16 PCM to Float32
     const int16 = new Int16Array(bytes.buffer);
     const float32 = new Float32Array(int16.length);
-    for (let i = 0; i < int16.length; i++) {
-        float32[i] = int16[i] / 32768;
-    }
+    for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
 
     const buffer = playbackContext.createBuffer(1, float32.length, OUTPUT_SAMPLE_RATE);
     buffer.getChannelData(0).set(float32);
@@ -169,9 +288,10 @@ function playAudio(base64Data) {
     nextPlayTime += buffer.duration;
 }
 
+// ── Transcript ──
+
 function addTranscript(role, content) {
     if (!content || content.trim() === "") return;
-    // Skip interrupted markers
     if (content.includes('"interrupted"')) return;
 
     const roleLabel = role === "USER" ? "You" : "Assistant";
@@ -183,6 +303,16 @@ function addTranscript(role, content) {
     transcriptEl.appendChild(div);
     transcriptEl.scrollTop = transcriptEl.scrollHeight;
 }
+
+function addSystemMessage(text) {
+    const div = document.createElement("div");
+    div.className = "msg system";
+    div.textContent = text;
+    transcriptEl.appendChild(div);
+    transcriptEl.scrollTop = transcriptEl.scrollHeight;
+}
+
+// ── Utilities ──
 
 function float32ToInt16(float32Array) {
     const int16 = new Int16Array(float32Array.length);
@@ -196,9 +326,7 @@ function float32ToInt16(float32Array) {
 function arrayBufferToBase64(buffer) {
     const bytes = new Uint8Array(buffer);
     let binary = "";
-    for (let i = 0; i < bytes.length; i++) {
-        binary += String.fromCharCode(bytes[i]);
-    }
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
     return btoa(binary);
 }
 
@@ -206,9 +334,7 @@ function updateVisualizer(float32) {
     const step = Math.floor(float32.length / bars.length);
     for (let i = 0; i < bars.length; i++) {
         let sum = 0;
-        for (let j = 0; j < step; j++) {
-            sum += Math.abs(float32[i * step + j]);
-        }
+        for (let j = 0; j < step; j++) sum += Math.abs(float32[i * step + j]);
         const avg = sum / step;
         const height = Math.max(4, Math.min(40, avg * 300));
         bars[i].style.height = `${height}px`;
@@ -220,3 +346,26 @@ function escapeHtml(text) {
     div.textContent = text;
     return div.innerHTML;
 }
+
+// ── Init ──
+
+const enableBtn = document.getElementById("enable-btn");
+
+enableBtn.addEventListener("click", async () => {
+    // Request mic permission with a user gesture — this unlocks everything
+    try {
+        const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        // Got permission, release the temp stream
+        tempStream.getTracks().forEach((t) => t.stop());
+
+        // Hide enable button, show mic button
+        enableBtn.style.display = "none";
+        micBtn.style.display = "flex";
+
+        // Now start wake word listening (mic permission already granted)
+        initWakeWord();
+        startWakeWordListening();
+    } catch (err) {
+        statusEl.textContent = `Mic permission denied: ${err.message}`;
+    }
+});
