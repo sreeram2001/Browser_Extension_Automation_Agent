@@ -1,0 +1,15 @@
+{
+    "name": "nova-sonic-web",
+    "version": "1.0.0",
+    "description": "Audio-to-audio web app using Amazon Nova Sonic",
+    "scripts": {
+        "start": "node server.js"
+    },
+    "dependencies": {
+        "@aws-sdk/client-bedrock-runtime": "^3.800.0",
+        "@aws-sdk/credential-provider-ini": "^3.800.0",
+        "@smithy/node-http-handler": "^4.0.0",
+        "express": "^4.21.0",
+        "ws": "^8.18.0"
+    }
+}
