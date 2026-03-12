@@ -44,34 +44,28 @@ function initWakeWord() {
     wakeWordRecognition.continuous = true;
     wakeWordRecognition.interimResults = true;
     wakeWordRecognition.lang = "en-US";
+    wakeWordRecognition.maxAlternatives = 3;
 
     wakeWordRecognition.onresult = (event) => {
         for (let i = event.resultIndex; i < event.results.length; i++) {
-            const transcript = event.results[i][0].transcript.toLowerCase().trim();
-            console.log("[Wake word] Heard:", transcript);
-
-            const variations = [WAKE_PHRASE];
-            const matched = variations.some((v) => transcript.includes(v));
-            console.log(matched)
-
-            if (matched) {
-                console.log("Wake word detected:", transcript);
-                addSystemMessage("Wake word detected!");
-                stopWakeWordListening();
-                startRecording();
-                return;
+            // Check all alternatives for faster matching
+            for (let alt = 0; alt < event.results[i].length; alt++) {
+                const transcript = event.results[i][alt].transcript.toLowerCase().trim();
+                if (transcript.includes(WAKE_PHRASE)) {
+                    addSystemMessage("Wake word detected!");
+                    stopWakeWordListening();
+                    startRecording();
+                    return;
+                }
             }
         }
     };
 
     wakeWordRecognition.onerror = (event) => {
-        console.warn("[Wake word] Error:", event.error);
-        // Restart on recoverable errors
+        // Restart immediately on recoverable errors
         if (event.error === "no-speech" || event.error === "aborted" || event.error === "network") {
             if (wakeWordActive && !isRecording) {
-                setTimeout(() => {
-                    try { wakeWordRecognition.start(); } catch (e) { }
-                }, 300);
+                try { wakeWordRecognition.start(); } catch (e) { }
             }
         }
     };
@@ -209,10 +203,17 @@ async function startRecording() {
                 addTranscript(msg.role, msg.content);
             } else if (msg.type === "tool_use") {
                 resetSilenceTimer();
-                addSystemMessage(`🔍 Searching the web...`);
+                if (msg.toolName === "schedule_zoom_meeting") {
+                    addSystemMessage("📅 Creating Zoom meeting...");
+                } else {
+                    addSystemMessage("🔍 Searching the web...");
+                }
             } else if (msg.type === "search_results") {
                 resetSilenceTimer();
                 addSearchResults(msg.query, msg.summary, msg.citations);
+            } else if (msg.type === "zoom_meeting") {
+                resetSilenceTimer();
+                addZoomMeeting(msg);
             } else if (msg.type === "error") {
                 statusEl.textContent = `Error: ${msg.message}`;
             } else if (msg.type === "session_end") {
@@ -334,6 +335,26 @@ function addSearchResults(query, summary, citations) {
     }
 
     div.innerHTML = html;
+    transcriptEl.appendChild(div);
+    transcriptEl.scrollTop = transcriptEl.scrollHeight;
+}
+
+function addZoomMeeting(data) {
+    const div = document.createElement("div");
+    div.className = "msg zoom-meeting";
+
+    if (data.success) {
+        div.innerHTML =
+            `<span class="label">📹 Zoom Meeting Created</span>` +
+            `<div class="zoom-topic">${escapeHtml(data.topic)}</div>` +
+            `<a href="${escapeHtml(data.join_url)}" target="_blank" rel="noopener" class="zoom-link">Join Meeting</a>` +
+            (data.passcode ? `<div class="zoom-passcode">Passcode: ${escapeHtml(data.passcode)}</div>` : "");
+    } else {
+        div.innerHTML =
+            `<span class="label">📹 Zoom</span>` +
+            `<div class="zoom-error">Failed: ${escapeHtml(data.error || "Unknown error")}</div>`;
+    }
+
     transcriptEl.appendChild(div);
     transcriptEl.scrollTop = transcriptEl.scrollHeight;
 }
