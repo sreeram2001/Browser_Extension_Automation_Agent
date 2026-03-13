@@ -22,8 +22,8 @@ app.use(express.static(path.join(__dirname, "public")));
 
 const REGION = process.env.AWS_REGION || "us-east-1";
 const MODEL_ID = "amazon.nova-sonic-v1:0";
-const GROUNDING_MODEL_ID = process.env.GROUNDING_MODEL_ID || "us.amazon.nova-lite-v1:0";
-const AWS_PROFILE = "uoc";
+const GROUNDING_MODEL_ID = process.env.GROUNDING_MODEL_ID || "us.amazon.nova-premier-v1:0";
+const AWS_PROFILE = process.env.AWS_PROFILE || "uoc";
 const VOICE_ID = process.env.VOICE_ID || "tiffany";
 
 // Tool definition that Nova Sonic will use to request web lookups
@@ -77,8 +77,38 @@ const ZOOM_MEETING_TOOL = {
     },
 };
 
-// Perform web grounding via Nova's built-in nova_grounding system tool (Converse API)
+// ── Web Grounding with LRU cache ──
+
+const groundingCache = new Map();
+const CACHE_MAX = 50;
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+function getCachedGrounding(query) {
+    const key = query.toLowerCase().trim();
+    const entry = groundingCache.get(key);
+    if (entry && Date.now() - entry.ts < CACHE_TTL_MS) {
+        return entry.data;
+    }
+    if (entry) groundingCache.delete(key);
+    return null;
+}
+
+function setCachedGrounding(query, data) {
+    const key = query.toLowerCase().trim();
+    if (groundingCache.size >= CACHE_MAX) {
+        const oldest = groundingCache.keys().next().value;
+        groundingCache.delete(oldest);
+    }
+    groundingCache.set(key, { data, ts: Date.now() });
+}
+
 async function performWebGrounding(query, bedrockClient) {
+    const cached = getCachedGrounding(query);
+    if (cached) {
+        console.log(`Grounding cache hit for "${query}"`);
+        return cached;
+    }
+
     try {
         const command = new ConverseCommand({
             modelId: GROUNDING_MODEL_ID,
@@ -121,11 +151,14 @@ async function performWebGrounding(query, bedrockClient) {
             }
         }
 
-        return {
+        const result = {
             query,
             summary: (text || "No results found.").substring(0, 2000),
             citations,
         };
+
+        setCachedGrounding(query, result);
+        return result;
     } catch (err) {
         console.error("Web grounding error:", err.message);
         return {
@@ -203,7 +236,7 @@ async function createZoomMeeting({ topic, duration, start_time }) {
         topic: topic || "Scheduled Meeting",
         type: start_time ? 2 : 1, // 2 = scheduled, 1 = instant
         duration: duration || 30,
-        timezone: "UTC",
+        timezone: "MST",
         settings: {
             join_before_host: true,
             waiting_room: false,
@@ -278,13 +311,11 @@ function createBedrockClient() {
     });
 }
 
-// Separate client for Converse API calls (nova_grounding) — uses default HTTPS handler
-function createConverseClient() {
-    return new BedrockRuntimeClient({
-        region: REGION,
-        credentials: fromIni({ profile: AWS_PROFILE }),
-    });
-}
+// Separate client for Converse API calls (nova_grounding) — shared singleton
+const converseClient = new BedrockRuntimeClient({
+    region: REGION,
+    credentials: fromIni({ profile: AWS_PROFILE }),
+});
 
 function randomId() {
     return crypto.randomUUID();
@@ -294,7 +325,6 @@ wss.on("connection", (ws) => {
     console.log("Client connected");
 
     let bedrockClient = createBedrockClient();
-    let converseClient = createConverseClient();
     let isActive = false;
     let promptName = randomId();
     let contentName = randomId();

@@ -153,9 +153,9 @@ async function startRecording() {
         });
 
         audioContext = new AudioContext({ sampleRate: INPUT_SAMPLE_RATE });
+        await audioContext.audioWorklet.addModule('audio-processor.js');
         const source = audioContext.createMediaStreamSource(mediaStream);
-        const bufferSize = 2048;
-        processorNode = audioContext.createScriptProcessor(bufferSize, 1, 1);
+        processorNode = new AudioWorkletNode(audioContext, 'recorder-processor');
 
         playbackContext = new AudioContext({ sampleRate: OUTPUT_SAMPLE_RATE });
         nextPlayTime = 0;
@@ -173,10 +173,10 @@ async function startRecording() {
             // Start silence timer
             resetSilenceTimer();
 
-            processorNode.onaudioprocess = (e) => {
+            processorNode.port.onmessage = (e) => {
                 if (!isRecording || !ws || ws.readyState !== WebSocket.OPEN) return;
 
-                const float32 = e.inputBuffer.getChannelData(0);
+                const float32 = e.data;
 
                 // Check if there's actual audio (not silence)
                 let rms = 0;
