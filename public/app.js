@@ -214,6 +214,9 @@ async function startRecording() {
             } else if (msg.type === "zoom_meeting") {
                 resetSilenceTimer();
                 addZoomMeeting(msg);
+            } else if (msg.type === "zoom_meetings_list") {
+                resetSilenceTimer();
+                addZoomMeetingsList(msg);
             } else if (msg.type === "error") {
                 statusEl.textContent = `Error: ${msg.message}`;
             } else if (msg.type === "session_end") {
@@ -344,6 +347,11 @@ function addZoomMeeting(data) {
     div.className = "msg zoom-meeting";
 
     if (data.success) {
+        // Auto-open the join link if it's an instant meeting
+        if (data.auto_join && data.join_url) {
+            window.open(data.join_url, "_blank");
+        }
+
         div.innerHTML =
             `<span class="label">📹 Zoom Meeting Created</span>` +
             `<div class="zoom-topic">${escapeHtml(data.topic)}</div>` +
@@ -353,6 +361,31 @@ function addZoomMeeting(data) {
         div.innerHTML =
             `<span class="label">📹 Zoom</span>` +
             `<div class="zoom-error">Failed: ${escapeHtml(data.error || "Unknown error")}</div>`;
+    }
+
+    transcriptEl.appendChild(div);
+    transcriptEl.scrollTop = transcriptEl.scrollHeight;
+}
+
+function addZoomMeetingsList(data) {
+    const div = document.createElement("div");
+    div.className = "msg zoom-meeting";
+
+    if (data.success && data.meetings.length > 0) {
+        let html = `<span class="label">📋 Upcoming Zoom Meetings (${data.total})</span>`;
+        data.meetings.forEach((m) => {
+            const time = m.start_time === "instant" ? "Instant" : new Date(m.start_time).toLocaleString();
+            html += `<div style="margin: 8px 0; padding: 6px 0; border-bottom: 1px solid #2a2a3e;">`;
+            html += `<div class="zoom-topic">${escapeHtml(m.topic)}</div>`;
+            html += `<div style="font-size: 0.78rem; color: #888;">${time} · ${m.duration} min</div>`;
+            html += `<a href="${escapeHtml(m.join_url)}" target="_blank" rel="noopener" class="zoom-link" style="margin-top: 4px;">Join</a>`;
+            html += `</div>`;
+        });
+        div.innerHTML = html;
+    } else if (data.success) {
+        div.innerHTML = `<span class="label">📋 Zoom Meetings</span><div style="color: #888;">No upcoming meetings found.</div>`;
+    } else {
+        div.innerHTML = `<span class="label">📋 Zoom</span><div class="zoom-error">Failed: ${escapeHtml(data.error || "Unknown error")}</div>`;
     }
 
     transcriptEl.appendChild(div);

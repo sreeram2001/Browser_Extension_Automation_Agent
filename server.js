@@ -77,6 +77,43 @@ const ZOOM_MEETING_TOOL = {
     },
 };
 
+// Tool definition for listing upcoming Zoom meetings
+const ZOOM_LIST_MEETINGS_TOOL = {
+    toolSpec: {
+        name: "list_zoom_meetings",
+        description:
+            "List upcoming scheduled Zoom meetings. Use this tool when the user asks to see their meetings, check their schedule, or asks 'what meetings do I have'.",
+        inputSchema: {
+            json: JSON.stringify({
+                type: "object",
+                properties: {},
+                required: [],
+            }),
+        },
+    },
+};
+
+// Tool definition for creating an instant Zoom meeting and auto-joining
+const ZOOM_INSTANT_MEETING_TOOL = {
+    toolSpec: {
+        name: "instant_zoom_meeting",
+        description:
+            "Create an instant Zoom meeting and join it immediately. Use this tool when the user says things like 'start a Zoom call', 'create an instant meeting', 'let's hop on a call', 'start a zoom meeting', or 'join a Zoom now'.",
+        inputSchema: {
+            json: JSON.stringify({
+                type: "object",
+                properties: {
+                    topic: {
+                        type: "string",
+                        description: "Optional meeting topic. Defaults to 'Instant Meeting'.",
+                    },
+                },
+                required: [],
+            }),
+        },
+    },
+};
+
 // ── Web Grounding with LRU cache ──
 
 const groundingCache = new Map();
@@ -296,6 +333,45 @@ async function createZoomMeeting({ topic, duration, start_time }) {
     });
 }
 
+async function listZoomMeetings() {
+    const token = await getZoomAccessToken();
+
+    return new Promise((resolve, reject) => {
+        const req = https.request(
+            {
+                hostname: "api.zoom.us",
+                path: "/v2/users/me/meetings?type=upcoming&page_size=10",
+                method: "GET",
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                    "Content-Type": "application/json",
+                },
+            },
+            (res) => {
+                let data = "";
+                res.on("data", (chunk) => (data += chunk));
+                res.on("end", () => {
+                    try {
+                        const json = JSON.parse(data);
+                        const meetings = (json.meetings || []).map((m) => ({
+                            id: m.id,
+                            topic: m.topic,
+                            start_time: m.start_time || "instant",
+                            duration: m.duration,
+                            join_url: m.join_url,
+                        }));
+                        resolve({ success: true, meetings, total: json.total_records || meetings.length });
+                    } catch (e) {
+                        resolve({ success: false, error: "Failed to parse Zoom response", meetings: [] });
+                    }
+                });
+            }
+        );
+        req.on("error", (err) => resolve({ success: false, error: err.message, meetings: [] }));
+        req.end();
+    });
+}
+
 function createBedrockClient() {
     const handler = new NodeHttp2Handler({
         requestTimeout: 300000,
@@ -376,7 +452,7 @@ wss.on("connection", (ws) => {
                                     mediaType: "application/json",
                                 },
                                 toolConfiguration: {
-                                    tools: [WEB_SEARCH_TOOL, ZOOM_MEETING_TOOL],
+                                    tools: [WEB_SEARCH_TOOL, ZOOM_MEETING_TOOL, ZOOM_INSTANT_MEETING_TOOL, ZOOM_LIST_MEETINGS_TOOL],
                                     toolChoice: { auto: {} },
                                 },
                             },
@@ -417,7 +493,7 @@ wss.on("connection", (ws) => {
                                 promptName,
                                 contentName,
                                 content:
-                                    "You are a friendly assistant with web search and Zoom meeting capabilities. The user and you will engage in a spoken dialog exchanging the transcripts of a natural real-time conversation. Keep your responses short, generally two or three sentences for chatty scenarios. When the user asks about current events, news, weather, real-time information, or anything you're unsure about, use the web_search tool to look it up. Always mention your sources briefly when using search results. When the user asks to schedule or create a Zoom meeting, use the schedule_zoom_meeting tool. Ask for a topic if the user doesn't provide one.",
+                                    "You are a friendly assistant with web search and Zoom meeting capabilities. The user and you will engage in a spoken dialog exchanging the transcripts of a natural real-time conversation. Keep your responses short, generally two or three sentences for chatty scenarios. When the user asks about current events, news, weather, real-time information, or anything you're unsure about, use the web_search tool to look it up. Always mention your sources briefly when using search results. When the user asks to schedule or create a Zoom meeting, use the schedule_zoom_meeting tool. When the user wants to start an instant call or join a Zoom right now, use the instant_zoom_meeting tool. When the user asks to see or list their meetings, use the list_zoom_meetings tool. Ask for a topic if the user doesn't provide one.",
                             },
                         },
                     })
@@ -753,6 +829,162 @@ wss.on("connection", (ws) => {
                                     });
                                 } catch (toolErr) {
                                     console.error("Zoom tool error:", toolErr);
+                                }
+                            } else if (toolName === "instant_zoom_meeting") {
+                                try {
+                                    const params = JSON.parse(toolContent);
+                                    console.log("Creating instant Zoom meeting:", params);
+
+                                    const meetingResult = await createZoomMeeting({
+                                        topic: params.topic || "Instant Meeting",
+                                    });
+                                    console.log("Instant Zoom meeting result:", meetingResult);
+
+                                    // Send with auto_join flag so the client opens it
+                                    if (ws.readyState === WebSocket.OPEN) {
+                                        ws.send(
+                                            JSON.stringify({
+                                                type: "zoom_meeting",
+                                                auto_join: true,
+                                                ...meetingResult,
+                                            })
+                                        );
+                                    }
+
+                                    const toolResultContentName = randomId();
+
+                                    pushInput({
+                                        chunk: {
+                                            bytes: Buffer.from(
+                                                JSON.stringify({
+                                                    event: {
+                                                        contentStart: {
+                                                            promptName,
+                                                            contentName: toolResultContentName,
+                                                            interactive: false,
+                                                            type: "TOOL",
+                                                            role: "TOOL",
+                                                            toolResultInputConfiguration: {
+                                                                toolUseId,
+                                                                type: "TEXT",
+                                                                textInputConfiguration: {
+                                                                    mediaType: "text/plain",
+                                                                },
+                                                            },
+                                                        },
+                                                    },
+                                                })
+                                            ),
+                                        },
+                                    });
+
+                                    pushInput({
+                                        chunk: {
+                                            bytes: Buffer.from(
+                                                JSON.stringify({
+                                                    event: {
+                                                        toolResult: {
+                                                            promptName,
+                                                            contentName: toolResultContentName,
+                                                            content: JSON.stringify(meetingResult),
+                                                        },
+                                                    },
+                                                })
+                                            ),
+                                        },
+                                    });
+
+                                    pushInput({
+                                        chunk: {
+                                            bytes: Buffer.from(
+                                                JSON.stringify({
+                                                    event: {
+                                                        contentEnd: {
+                                                            promptName,
+                                                            contentName: toolResultContentName,
+                                                        },
+                                                    },
+                                                })
+                                            ),
+                                        },
+                                    });
+                                } catch (toolErr) {
+                                    console.error("Instant Zoom tool error:", toolErr);
+                                }
+                            } else if (toolName === "list_zoom_meetings") {
+                                try {
+                                    console.log("Listing Zoom meetings");
+                                    const listResult = await listZoomMeetings();
+                                    console.log("Zoom meetings list:", listResult.total, "meetings");
+
+                                    if (ws.readyState === WebSocket.OPEN) {
+                                        ws.send(
+                                            JSON.stringify({
+                                                type: "zoom_meetings_list",
+                                                ...listResult,
+                                            })
+                                        );
+                                    }
+
+                                    const toolResultContentName = randomId();
+
+                                    pushInput({
+                                        chunk: {
+                                            bytes: Buffer.from(
+                                                JSON.stringify({
+                                                    event: {
+                                                        contentStart: {
+                                                            promptName,
+                                                            contentName: toolResultContentName,
+                                                            interactive: false,
+                                                            type: "TOOL",
+                                                            role: "TOOL",
+                                                            toolResultInputConfiguration: {
+                                                                toolUseId,
+                                                                type: "TEXT",
+                                                                textInputConfiguration: {
+                                                                    mediaType: "text/plain",
+                                                                },
+                                                            },
+                                                        },
+                                                    },
+                                                })
+                                            ),
+                                        },
+                                    });
+
+                                    pushInput({
+                                        chunk: {
+                                            bytes: Buffer.from(
+                                                JSON.stringify({
+                                                    event: {
+                                                        toolResult: {
+                                                            promptName,
+                                                            contentName: toolResultContentName,
+                                                            content: JSON.stringify(listResult),
+                                                        },
+                                                    },
+                                                })
+                                            ),
+                                        },
+                                    });
+
+                                    pushInput({
+                                        chunk: {
+                                            bytes: Buffer.from(
+                                                JSON.stringify({
+                                                    event: {
+                                                        contentEnd: {
+                                                            promptName,
+                                                            contentName: toolResultContentName,
+                                                        },
+                                                    },
+                                                })
+                                            ),
+                                        },
+                                    });
+                                } catch (toolErr) {
+                                    console.error("List Zoom meetings error:", toolErr);
                                 }
                             }
                         } else if (json.event?.contentStart) {
