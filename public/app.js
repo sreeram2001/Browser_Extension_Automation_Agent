@@ -217,6 +217,12 @@ async function startRecording() {
             } else if (msg.type === "zoom_meetings_list") {
                 resetSilenceTimer();
                 addZoomMeetingsList(msg);
+            } else if (msg.type === "meeting_summary") {
+                resetSilenceTimer();
+                addMeetingSummary(msg);
+            } else if (msg.type === "google_meet") {
+                resetSilenceTimer();
+                addGoogleMeet(msg);
             } else if (msg.type === "error") {
                 statusEl.textContent = `Error: ${msg.message}`;
             } else if (msg.type === "session_end") {
@@ -387,6 +393,58 @@ function addZoomMeetingsList(data) {
     } else {
         div.innerHTML = `<span class="label">📋 Zoom</span><div class="zoom-error">Failed: ${escapeHtml(data.error || "Unknown error")}</div>`;
     }
+
+    transcriptEl.appendChild(div);
+    transcriptEl.scrollTop = transcriptEl.scrollHeight;
+}
+
+function addGoogleMeet(data) {
+    const div = document.createElement("div");
+    div.className = "msg zoom-meeting";
+    div.style.borderLeftColor = "#34a853";
+
+    if (data.success) {
+        const time = new Date(data.start_time).toLocaleString();
+        div.innerHTML =
+            `<span class="label" style="color: #34a853;">📹 Google Meet Created</span>` +
+            `<div class="zoom-topic">${escapeHtml(data.topic)}</div>` +
+            `<div style="font-size: 0.78rem; color: #888;">${time} · ${data.duration} min</div>` +
+            `<a href="${escapeHtml(data.meet_link)}" target="_blank" rel="noopener" class="zoom-link" style="background: #34a853;">Join Google Meet</a>`;
+    } else {
+        div.innerHTML =
+            `<span class="label" style="color: #34a853;">📹 Google Meet</span>` +
+            `<div class="zoom-error">Failed: ${escapeHtml(data.error || "Unknown error")}</div>`;
+    }
+
+    transcriptEl.appendChild(div);
+    transcriptEl.scrollTop = transcriptEl.scrollHeight;
+}
+
+function addMeetingSummary(data) {
+    const div = document.createElement("div");
+    div.className = "msg search-results";
+    div.style.borderLeftColor = "#a0d995";
+
+    let html = `<span class="label">📋 Meeting Summary</span>`;
+    html += `<div style="font-size: 0.8rem; color: #888; margin-bottom: 6px;">${escapeHtml(data.fileName)}</div>`;
+    html += `<div style="white-space: pre-wrap; font-size: 0.85rem; line-height: 1.5;">${escapeHtml(data.summary)}</div>`;
+    if (data.slack_posted) {
+        html += `<div style="margin-top: 8px; font-size: 0.78rem; color: #a0d995;">✅ Posted to Slack</div>`;
+    }
+    html += `<button class="download-summary-btn" style="margin-top: 10px; padding: 4px 14px; font-size: 0.82rem; border-radius: 4px; border: 1px solid #a0d995; background: transparent; color: #a0d995; cursor: pointer; transition: background 0.2s;">⬇ Download Notes</button>`;
+
+    div.innerHTML = html;
+
+    div.querySelector(".download-summary-btn").addEventListener("click", () => {
+        const text = `${data.fileName}\n${"=".repeat(40)}\n\n${data.summary}`;
+        const blob = new Blob([text], { type: "text/plain" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${data.fileName.replace(/[^a-z0-9]/gi, "_")}_summary.txt`;
+        a.click();
+        URL.revokeObjectURL(url);
+    });
 
     transcriptEl.appendChild(div);
     transcriptEl.scrollTop = transcriptEl.scrollHeight;

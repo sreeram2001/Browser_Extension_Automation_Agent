@@ -12,6 +12,8 @@ const { NodeHttp2Handler } = require("@smithy/node-http-handler");
 const { fromIni } = require("@aws-sdk/credential-provider-ini");
 const crypto = require("crypto");
 const https = require("https");
+const fs = require("fs");
+const { google } = require("googleapis");
 
 // iwejofe
 const app = express();
@@ -68,7 +70,7 @@ const ZOOM_MEETING_TOOL = {
                     start_time: {
                         type: "string",
                         description:
-                            "Meeting start time in ISO 8601 format (e.g. 2025-03-15T14:00:00Z). If not provided, creates an instant meeting.",
+                            "Meeting start time in ISO 8601 format with MST offset (e.g. 2025-03-15T14:00:00-07:00). If not provided, creates an instant meeting.",
                     },
                 },
                 required: ["topic"],
@@ -106,6 +108,60 @@ const ZOOM_INSTANT_MEETING_TOOL = {
                     topic: {
                         type: "string",
                         description: "Optional meeting topic. Defaults to 'Instant Meeting'.",
+                    },
+                },
+                required: [],
+            }),
+        },
+    },
+};
+
+// Tool definition for creating a Google Meet meeting via Google Calendar
+const GOOGLE_MEET_TOOL = {
+    toolSpec: {
+        name: "create_google_meet",
+        description:
+            "Create a Google Meet meeting by adding a calendar event with a Google Meet link. Use this when the user asks to create a Google Meet, schedule a Google Meet, or start a Google Meet call.",
+        inputSchema: {
+            json: JSON.stringify({
+                type: "object",
+                properties: {
+                    topic: {
+                        type: "string",
+                        description: "The meeting topic or title.",
+                    },
+                    start_time: {
+                        type: "string",
+                        description: "Meeting start time in ISO 8601 format with MST offset (e.g. 2025-03-15T14:00:00-07:00). If not provided, starts in 5 minutes.",
+                    },
+                    duration: {
+                        type: "number",
+                        description: "Meeting duration in minutes. Defaults to 30.",
+                    },
+                    attendees: {
+                        type: "string",
+                        description: "Comma-separated email addresses of attendees to invite. Optional.",
+                    },
+                },
+                required: ["topic"],
+            }),
+        },
+    },
+};
+
+// Tool definition for fetching and summarizing a meeting transcript
+const SUMMARIZE_MEETING_TOOL = {
+    toolSpec: {
+        name: "summarize_meeting",
+        description:
+            "Fetch the latest Google Meet transcript from Google Drive, summarize it, and optionally post the summary to Slack. Use this when the user says things like 'summarize my last meeting', 'get my meeting notes', or 'send meeting summary to Slack'.",
+        inputSchema: {
+            json: JSON.stringify({
+                type: "object",
+                properties: {
+                    post_to_slack: {
+                        type: "boolean",
+                        description: "Whether to also post the summary to Slack. Defaults to false.",
                     },
                 },
                 required: [],
@@ -273,7 +329,7 @@ async function createZoomMeeting({ topic, duration, start_time }) {
         topic: topic || "Scheduled Meeting",
         type: start_time ? 2 : 1, // 2 = scheduled, 1 = instant
         duration: duration || 30,
-        timezone: "MST",
+        timezone: "America/Arizona",
         settings: {
             join_before_host: true,
             waiting_room: false,
@@ -372,6 +428,183 @@ async function listZoomMeetings() {
     });
 }
 
+// ── Google Drive Integration ──
+
+function getGoogleAuth() {
+    const credPath = path.join(__dirname, "credentials.json");
+    const tokenPath = path.join(__dirname, "google-token.json");
+
+    if (!fs.existsSync(credPath) || !fs.existsSync(tokenPath)) {
+        throw new Error("Google credentials not configured. Run: node google-auth.js");
+    }
+
+    const creds = JSON.parse(fs.readFileSync(credPath, "utf-8"));
+    const { client_id, client_secret } = creds.installed || creds.web;
+    const oauth2Client = new google.auth.OAuth2(client_id, client_secret);
+    const tokens = JSON.parse(fs.readFileSync(tokenPath, "utf-8"));
+    oauth2Client.setCredentials(tokens);
+
+    // Auto-refresh token
+    oauth2Client.on("tokens", (newTokens) => {
+        const merged = { ...tokens, ...newTokens };
+        fs.writeFileSync(tokenPath, JSON.stringify(merged, null, 2));
+    });
+
+    return oauth2Client;
+}
+
+async function fetchLatestMeetTranscript() {
+    const auth = getGoogleAuth();
+    const drive = google.drive({ version: "v3", auth });
+
+    // Search for Meet transcript docs
+    const res = await drive.files.list({
+        q: "name contains 'transcript' and mimeType = 'application/vnd.google-apps.document'",
+        orderBy: "modifiedTime desc",
+        pageSize: 5,
+        fields: "files(id, name, modifiedTime)",
+    });
+
+    const files = res.data.files || [];
+    if (files.length === 0) {
+        return { success: false, error: "No meeting transcript is available yet. Google Meet can take a few minutes to upload the transcript to Drive after the meeting ends. Please try again in a few minutes." };
+    }
+
+    const latest = files[0];
+
+    // Export as plain text
+    const content = await drive.files.export({
+        fileId: latest.id,
+        mimeType: "text/plain",
+    });
+
+    return {
+        success: true,
+        fileName: latest.name,
+        modifiedTime: latest.modifiedTime,
+        transcript: content.data.substring(0, 15000), // cap at 15k chars
+    };
+}
+
+// ── Google Meet (via Calendar) ──
+
+async function createGoogleMeet({ topic, start_time, duration, attendees }) {
+    const auth = getGoogleAuth();
+    const calendar = google.calendar({ version: "v3", auth });
+
+    const durationMin = duration || 30;
+    const start = start_time ? new Date(start_time) : new Date(Date.now() + 5 * 60 * 1000);
+    const end = new Date(start.getTime() + durationMin * 60 * 1000);
+
+    const event = {
+        summary: topic || "Google Meet Meeting",
+        start: { dateTime: start.toISOString(), timeZone: "America/Denver" },
+        end: { dateTime: end.toISOString(), timeZone: "America/Denver" },
+        conferenceData: {
+            createRequest: {
+                requestId: crypto.randomUUID(),
+                conferenceSolutionKey: { type: "hangoutsMeet" },
+            },
+        },
+    };
+
+    if (attendees) {
+        event.attendees = attendees.split(",").map((e) => ({ email: e.trim() }));
+    }
+
+    try {
+        const res = await calendar.events.insert({
+            calendarId: "primary",
+            resource: event,
+            conferenceDataVersion: 1,
+            sendUpdates: attendees ? "all" : "none",
+        });
+
+        const meetLink = res.data.hangoutLink || res.data.conferenceData?.entryPoints?.[0]?.uri;
+
+        return {
+            success: true,
+            topic: res.data.summary,
+            meet_link: meetLink || "",
+            start_time: res.data.start.dateTime,
+            duration: durationMin,
+            event_id: res.data.id,
+        };
+    } catch (err) {
+        console.error("Google Meet creation error:", err.message);
+        return { success: false, error: err.message };
+    }
+}
+
+// ── Meeting Summarization ──
+
+async function summarizeMeetingTranscript(transcript, bedrockClient) {
+    const command = new ConverseCommand({
+        modelId: GROUNDING_MODEL_ID,
+        messages: [
+            {
+                role: "user",
+                content: [
+                    {
+                        text: `Summarize the following meeting transcript into a structured report with these sections:
+- **Meeting Summary**: 2-3 sentence overview
+- **Key Discussion Points**: bullet points of main topics
+- **Action Items**: specific tasks and owners if mentioned
+- **Decisions Made**: any decisions reached
+
+Transcript:
+${transcript}`,
+                    },
+                ],
+            },
+        ],
+    });
+
+    const response = await bedrockClient.send(command);
+    const contentList = response.output?.message?.content || [];
+    let summary = "";
+    for (const block of contentList) {
+        if (block.text) summary += block.text;
+    }
+    return summary || "Failed to generate summary.";
+}
+
+// ── Slack Integration ──
+
+function postToSlack(message) {
+    const webhookUrl = process.env.SLACK_WEBHOOK_URL;
+    if (!webhookUrl || webhookUrl === "your-slack-webhook-url-here") {
+        return Promise.resolve({ success: false, error: "Slack webhook not configured." });
+    }
+
+    const url = new URL(webhookUrl);
+    const body = JSON.stringify({ text: message });
+
+    return new Promise((resolve) => {
+        const req = https.request(
+            {
+                hostname: url.hostname,
+                path: url.pathname,
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Content-Length": Buffer.byteLength(body),
+                },
+            },
+            (res) => {
+                let data = "";
+                res.on("data", (chunk) => (data += chunk));
+                res.on("end", () => {
+                    resolve({ success: res.statusCode === 200, response: data });
+                });
+            }
+        );
+        req.on("error", (err) => resolve({ success: false, error: err.message }));
+        req.write(body);
+        req.end();
+    });
+}
+
 function createBedrockClient() {
     const handler = new NodeHttp2Handler({
         requestTimeout: 300000,
@@ -395,6 +628,12 @@ const converseClient = new BedrockRuntimeClient({
 
 function randomId() {
     return crypto.randomUUID();
+}
+
+// Strip URLs and passcodes so Nova Sonic doesn't read them aloud
+function sanitizeMeetingResult(result) {
+    const { join_url, passcode, meeting_id, ...safe } = result;
+    return safe;
 }
 
 wss.on("connection", (ws) => {
@@ -452,7 +691,7 @@ wss.on("connection", (ws) => {
                                     mediaType: "application/json",
                                 },
                                 toolConfiguration: {
-                                    tools: [WEB_SEARCH_TOOL, ZOOM_MEETING_TOOL, ZOOM_INSTANT_MEETING_TOOL, ZOOM_LIST_MEETINGS_TOOL],
+                                    tools: [WEB_SEARCH_TOOL, ZOOM_MEETING_TOOL, ZOOM_INSTANT_MEETING_TOOL, ZOOM_LIST_MEETINGS_TOOL, GOOGLE_MEET_TOOL, SUMMARIZE_MEETING_TOOL],
                                     toolChoice: { auto: {} },
                                 },
                             },
@@ -493,7 +732,7 @@ wss.on("connection", (ws) => {
                                 promptName,
                                 contentName,
                                 content:
-                                    "You are a friendly assistant with web search and Zoom meeting capabilities. The user and you will engage in a spoken dialog exchanging the transcripts of a natural real-time conversation. Keep your responses short, generally two or three sentences for chatty scenarios. When the user asks about current events, news, weather, real-time information, or anything you're unsure about, use the web_search tool to look it up. Always mention your sources briefly when using search results. When the user asks to schedule or create a Zoom meeting, use the schedule_zoom_meeting tool. When the user wants to start an instant call or join a Zoom right now, use the instant_zoom_meeting tool. When the user asks to see or list their meetings, use the list_zoom_meetings tool. Ask for a topic if the user doesn't provide one.",
+                                    `You are a friendly assistant with web search, Zoom meeting, Google Meet, and meeting summary capabilities. Today's date is ${new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric", timeZone: "America/Denver" })}. The user and you will engage in a spoken dialog exchanging the transcripts of a natural real-time conversation. Keep your responses short, generally two or three sentences for chatty scenarios. When the user asks about current events, news, weather, real-time information, or anything you're unsure about, use the web_search tool to look it up. Always mention your sources briefly when using search results. When the user asks to schedule or create a Zoom meeting, use the schedule_zoom_meeting tool. Always assume the user's timezone is MST (Mountain Standard Time, UTC-7) and convert times to ISO 8601 with the MST offset. Always use the current year when scheduling meetings. When the user wants to start an instant call or join a Zoom right now, use the instant_zoom_meeting tool. When the user asks to see or list their meetings, use the list_zoom_meetings tool. When the user asks to create or schedule a Google Meet, use the create_google_meet tool. When the user asks to summarize a meeting, get meeting notes, or send a meeting summary to Slack, use the summarize_meeting tool. Ask if they want it posted to Slack. Do not read out meeting links or IDs. Ask for a topic if the user doesn't provide one.`,
                             },
                         },
                     })
@@ -769,8 +1008,9 @@ wss.on("connection", (ws) => {
                                         );
                                     }
 
-                                    // Send tool result back to Nova Sonic
+                                    // Send tool result back to Nova Sonic (sanitized)
                                     const toolResultContentName = randomId();
+                                    const safeResult = sanitizeMeetingResult(meetingResult);
 
                                     pushInput({
                                         chunk: {
@@ -805,7 +1045,7 @@ wss.on("connection", (ws) => {
                                                         toolResult: {
                                                             promptName,
                                                             contentName: toolResultContentName,
-                                                            content: JSON.stringify(meetingResult),
+                                                            content: JSON.stringify(safeResult),
                                                         },
                                                     },
                                                 })
@@ -852,6 +1092,7 @@ wss.on("connection", (ws) => {
                                     }
 
                                     const toolResultContentName = randomId();
+                                    const safeResult = sanitizeMeetingResult(meetingResult);
 
                                     pushInput({
                                         chunk: {
@@ -886,7 +1127,7 @@ wss.on("connection", (ws) => {
                                                         toolResult: {
                                                             promptName,
                                                             contentName: toolResultContentName,
-                                                            content: JSON.stringify(meetingResult),
+                                                            content: JSON.stringify(safeResult),
                                                         },
                                                     },
                                                 })
@@ -961,7 +1202,15 @@ wss.on("connection", (ws) => {
                                                         toolResult: {
                                                             promptName,
                                                             contentName: toolResultContentName,
-                                                            content: JSON.stringify(listResult),
+                                                            content: JSON.stringify({
+                                                                success: listResult.success,
+                                                                total: listResult.total,
+                                                                meetings: (listResult.meetings || []).map(m => ({
+                                                                    topic: m.topic,
+                                                                    start_time: m.start_time,
+                                                                    duration: m.duration,
+                                                                })),
+                                                            }),
                                                         },
                                                     },
                                                 })
@@ -985,6 +1234,206 @@ wss.on("connection", (ws) => {
                                     });
                                 } catch (toolErr) {
                                     console.error("List Zoom meetings error:", toolErr);
+                                }
+                            } else if (toolName === "summarize_meeting") {
+                                try {
+                                    const params = JSON.parse(toolContent);
+                                    console.log("Summarizing meeting, post_to_slack:", params.post_to_slack);
+
+                                    if (ws.readyState === WebSocket.OPEN) {
+                                        ws.send(JSON.stringify({ type: "tool_use", toolName: "summarize_meeting", content: toolContent }));
+                                    }
+
+                                    // 1. Fetch transcript from Google Drive
+                                    const transcriptResult = await fetchLatestMeetTranscript();
+                                    let toolResponse;
+
+                                    if (!transcriptResult.success) {
+                                        toolResponse = { success: false, error: transcriptResult.error };
+                                    } else {
+                                        // 2. Summarize with Nova
+                                        const summary = await summarizeMeetingTranscript(transcriptResult.transcript, converseClient);
+
+                                        toolResponse = {
+                                            success: true,
+                                            fileName: transcriptResult.fileName,
+                                            summary,
+                                        };
+
+                                        // 3. Post to Slack if requested
+                                        if (params.post_to_slack) {
+                                            const slackMessage = `📋 *Meeting Summary*\n_${transcriptResult.fileName}_\n\n${summary}`;
+                                            const slackResult = await postToSlack(slackMessage);
+                                            toolResponse.slack_posted = slackResult.success;
+                                            if (!slackResult.success) {
+                                                toolResponse.slack_error = slackResult.error;
+                                            }
+                                        }
+
+                                        // Send summary to client for display
+                                        if (ws.readyState === WebSocket.OPEN) {
+                                            ws.send(JSON.stringify({
+                                                type: "meeting_summary",
+                                                fileName: transcriptResult.fileName,
+                                                summary,
+                                                slack_posted: toolResponse.slack_posted || false,
+                                            }));
+                                        }
+                                    }
+
+                                    const toolResultContentName = randomId();
+
+                                    pushInput({
+                                        chunk: {
+                                            bytes: Buffer.from(
+                                                JSON.stringify({
+                                                    event: {
+                                                        contentStart: {
+                                                            promptName,
+                                                            contentName: toolResultContentName,
+                                                            interactive: false,
+                                                            type: "TOOL",
+                                                            role: "TOOL",
+                                                            toolResultInputConfiguration: {
+                                                                toolUseId,
+                                                                type: "TEXT",
+                                                                textInputConfiguration: {
+                                                                    mediaType: "text/plain",
+                                                                },
+                                                            },
+                                                        },
+                                                    },
+                                                })
+                                            ),
+                                        },
+                                    });
+
+                                    // Send sanitized result (no full transcript)
+                                    const safeToolResponse = {
+                                        success: toolResponse.success,
+                                        fileName: toolResponse.fileName,
+                                        summary_preview: toolResponse.summary ? toolResponse.summary.substring(0, 500) : undefined,
+                                        slack_posted: toolResponse.slack_posted,
+                                        error: toolResponse.error,
+                                    };
+
+                                    pushInput({
+                                        chunk: {
+                                            bytes: Buffer.from(
+                                                JSON.stringify({
+                                                    event: {
+                                                        toolResult: {
+                                                            promptName,
+                                                            contentName: toolResultContentName,
+                                                            content: JSON.stringify(safeToolResponse),
+                                                        },
+                                                    },
+                                                })
+                                            ),
+                                        },
+                                    });
+
+                                    pushInput({
+                                        chunk: {
+                                            bytes: Buffer.from(
+                                                JSON.stringify({
+                                                    event: {
+                                                        contentEnd: {
+                                                            promptName,
+                                                            contentName: toolResultContentName,
+                                                        },
+                                                    },
+                                                })
+                                            ),
+                                        },
+                                    });
+                                } catch (toolErr) {
+                                    console.error("Summarize meeting error:", toolErr);
+                                }
+                            } else if (toolName === "create_google_meet") {
+                                try {
+                                    const params = JSON.parse(toolContent);
+                                    console.log("Creating Google Meet:", params);
+
+                                    const meetResult = await createGoogleMeet(params);
+                                    console.log("Google Meet result:", meetResult);
+
+                                    // Send full result to client for display
+                                    if (ws.readyState === WebSocket.OPEN) {
+                                        ws.send(JSON.stringify({
+                                            type: "google_meet",
+                                            ...meetResult,
+                                        }));
+                                    }
+
+                                    const toolResultContentName = randomId();
+
+                                    // Sanitize — don't send link/ID to model
+                                    const safeResult = {
+                                        success: meetResult.success,
+                                        topic: meetResult.topic,
+                                        start_time: meetResult.start_time,
+                                        duration: meetResult.duration,
+                                        error: meetResult.error,
+                                    };
+
+                                    pushInput({
+                                        chunk: {
+                                            bytes: Buffer.from(
+                                                JSON.stringify({
+                                                    event: {
+                                                        contentStart: {
+                                                            promptName,
+                                                            contentName: toolResultContentName,
+                                                            interactive: false,
+                                                            type: "TOOL",
+                                                            role: "TOOL",
+                                                            toolResultInputConfiguration: {
+                                                                toolUseId,
+                                                                type: "TEXT",
+                                                                textInputConfiguration: {
+                                                                    mediaType: "text/plain",
+                                                                },
+                                                            },
+                                                        },
+                                                    },
+                                                })
+                                            ),
+                                        },
+                                    });
+
+                                    pushInput({
+                                        chunk: {
+                                            bytes: Buffer.from(
+                                                JSON.stringify({
+                                                    event: {
+                                                        toolResult: {
+                                                            promptName,
+                                                            contentName: toolResultContentName,
+                                                            content: JSON.stringify(safeResult),
+                                                        },
+                                                    },
+                                                })
+                                            ),
+                                        },
+                                    });
+
+                                    pushInput({
+                                        chunk: {
+                                            bytes: Buffer.from(
+                                                JSON.stringify({
+                                                    event: {
+                                                        contentEnd: {
+                                                            promptName,
+                                                            contentName: toolResultContentName,
+                                                        },
+                                                    },
+                                                })
+                                            ),
+                                        },
+                                    });
+                                } catch (toolErr) {
+                                    console.error("Google Meet creation error:", toolErr);
                                 }
                             }
                         } else if (json.event?.contentStart) {
