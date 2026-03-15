@@ -116,12 +116,82 @@ const ZOOM_INSTANT_MEETING_TOOL = {
     },
 };
 
+// Tool definition for listing Google Calendar events
+const GOOGLE_CALENDAR_LIST_TOOL = {
+    toolSpec: {
+        name: "list_google_calendar_events",
+        description:
+            "List upcoming events from the user's Google Calendar. Use this when the user asks 'what's on my calendar', 'what meetings do I have today', 'am I free tomorrow', or 'show my schedule'.",
+        inputSchema: {
+            json: JSON.stringify({
+                type: "object",
+                properties: {
+                    date: {
+                        type: "string",
+                        description: "Optional date to check in ISO 8601 format (e.g. 2025-07-14). If not provided, shows today's events.",
+                    },
+                    days: {
+                        type: "number",
+                        description: "Number of days to look ahead. Defaults to 1.",
+                    },
+                },
+                required: [],
+            }),
+        },
+    },
+};
+
+// Tool definition for adding a Google Calendar event (no Meet link)
+const GOOGLE_CALENDAR_ADD_TOOL = {
+    toolSpec: {
+        name: "add_google_calendar_event",
+        description:
+            "Add a new event to the user's Google Calendar. Use this when the user asks to 'add an event', 'create a calendar event', 'block time', 'schedule something on my calendar', or 'put X on my calendar'. Do NOT use this for Google Meet meetings — use create_google_meet instead. This tool automatically checks for scheduling conflicts. If a conflict is found, tell the user about the conflicting events and ask if they want to proceed. If they confirm, call this tool again with force set to true.",
+        inputSchema: {
+            json: JSON.stringify({
+                type: "object",
+                properties: {
+                    title: {
+                        type: "string",
+                        description: "The event title or summary.",
+                    },
+                    start_time: {
+                        type: "string",
+                        description: "Event start time in ISO 8601 format with MST offset (e.g. 2025-03-15T14:00:00-07:00).",
+                    },
+                    duration: {
+                        type: "number",
+                        description: "Event duration in minutes. Defaults to 60.",
+                    },
+                    description: {
+                        type: "string",
+                        description: "Optional event description or notes.",
+                    },
+                    location: {
+                        type: "string",
+                        description: "Optional event location.",
+                    },
+                    attendees: {
+                        type: "string",
+                        description: "Comma-separated email addresses of attendees. Optional.",
+                    },
+                    force: {
+                        type: "boolean",
+                        description: "Set to true to create the event even if there are conflicts. Only use after the user confirms.",
+                    },
+                },
+                required: ["title", "start_time"],
+            }),
+        },
+    },
+};
+
 // Tool definition for creating a Google Meet meeting via Google Calendar
 const GOOGLE_MEET_TOOL = {
     toolSpec: {
         name: "create_google_meet",
         description:
-            "Create a Google Meet meeting by adding a calendar event with a Google Meet link. Use this when the user asks to create a Google Meet, schedule a Google Meet, or start a Google Meet call.",
+            "Create a Google Meet meeting by adding a calendar event with a Google Meet link. Use this when the user asks to create a Google Meet, schedule a Google Meet, or start a Google Meet call. This tool automatically checks for scheduling conflicts. If a conflict is found, tell the user about the conflicting events and ask if they want to proceed. If they confirm, call this tool again with force set to true.",
         inputSchema: {
             json: JSON.stringify({
                 type: "object",
@@ -141,6 +211,10 @@ const GOOGLE_MEET_TOOL = {
                     attendees: {
                         type: "string",
                         description: "Comma-separated email addresses of attendees to invite. Optional.",
+                    },
+                    force: {
+                        type: "boolean",
+                        description: "Set to true to create the meeting even if there are conflicts. Only use after the user confirms.",
                     },
                 },
                 required: ["topic"],
@@ -329,7 +403,7 @@ async function createZoomMeeting({ topic, duration, start_time }) {
         topic: topic || "Scheduled Meeting",
         type: start_time ? 2 : 1, // 2 = scheduled, 1 = instant
         duration: duration || 30,
-        timezone: "America/Arizona",
+        timezone: "America/Denver",
         settings: {
             join_before_host: true,
             waiting_room: false,
@@ -486,15 +560,85 @@ async function fetchLatestMeetTranscript() {
     };
 }
 
+// ── Google Calendar Events ──
+
+async function listGoogleCalendarEvents({ date, days }) {
+    const auth = getGoogleAuth();
+    const calendar = google.calendar({ version: "v3", auth });
+
+    const numDays = days || 1;
+    const startDate = date ? new Date(date + "T00:00:00-07:00") : new Date();
+    startDate.setHours(0, 0, 0, 0);
+    const endDate = new Date(startDate.getTime() + numDays * 24 * 60 * 60 * 1000);
+
+    try {
+        const res = await calendar.events.list({
+            calendarId: "primary",
+            timeMin: startDate.toISOString(),
+            timeMax: endDate.toISOString(),
+            maxResults: 20,
+            singleEvents: true,
+            orderBy: "startTime",
+        });
+
+        const events = (res.data.items || []).map((e) => ({
+            title: e.summary || "(No title)",
+            start: e.start.dateTime || e.start.date,
+            end: e.end.dateTime || e.end.date,
+            meet_link: e.hangoutLink || null,
+            location: e.location || null,
+        }));
+
+        return { success: true, events, total: events.length };
+    } catch (err) {
+        console.error("Google Calendar list error:", err.message);
+        return { success: false, error: err.message, events: [] };
+    }
+}
+
 // ── Google Meet (via Calendar) ──
 
-async function createGoogleMeet({ topic, start_time, duration, attendees }) {
+async function checkCalendarConflicts(auth, start, end) {
+    const calendar = google.calendar({ version: "v3", auth });
+    try {
+        const res = await calendar.events.list({
+            calendarId: "primary",
+            timeMin: start.toISOString(),
+            timeMax: end.toISOString(),
+            singleEvents: true,
+            orderBy: "startTime",
+        });
+        return (res.data.items || []).map((e) => ({
+            title: e.summary || "(No title)",
+            start: e.start.dateTime || e.start.date,
+            end: e.end.dateTime || e.end.date,
+        }));
+    } catch (err) {
+        console.error("Conflict check error:", err.message);
+        return [];
+    }
+}
+
+async function createGoogleMeet({ topic, start_time, duration, attendees, force }) {
     const auth = getGoogleAuth();
     const calendar = google.calendar({ version: "v3", auth });
 
     const durationMin = duration || 30;
     const start = start_time ? new Date(start_time) : new Date(Date.now() + 5 * 60 * 1000);
     const end = new Date(start.getTime() + durationMin * 60 * 1000);
+
+    // Check for conflicts unless force is true
+    if (!force) {
+        const conflicts = await checkCalendarConflicts(auth, start, end);
+        if (conflicts.length > 0) {
+            return {
+                success: false,
+                conflict: true,
+                conflicts,
+                message: `There are ${conflicts.length} conflicting event(s) during this time. Ask the user if they want to proceed anyway.`,
+            };
+        }
+    }
 
     const event = {
         summary: topic || "Google Meet Meeting",
@@ -537,6 +681,61 @@ async function createGoogleMeet({ topic, start_time, duration, attendees }) {
 }
 
 // ── Meeting Summarization ──
+
+async function addGoogleCalendarEvent({ title, start_time, duration, description, location, attendees, force }) {
+    const auth = getGoogleAuth();
+    const calendar = google.calendar({ version: "v3", auth });
+
+    const durationMin = duration || 60;
+    const start = new Date(start_time);
+    const end = new Date(start.getTime() + durationMin * 60 * 1000);
+
+    // Check for conflicts unless force is true
+    if (!force) {
+        const conflicts = await checkCalendarConflicts(auth, start, end);
+        if (conflicts.length > 0) {
+            return {
+                success: false,
+                conflict: true,
+                conflicts,
+                message: `There are ${conflicts.length} conflicting event(s) during this time. Ask the user if they want to proceed anyway.`,
+            };
+        }
+    }
+
+    const event = {
+        summary: title,
+        start: { dateTime: start.toISOString(), timeZone: "America/Denver" },
+        end: { dateTime: end.toISOString(), timeZone: "America/Denver" },
+    };
+
+    if (description) event.description = description;
+    if (location) event.location = location;
+    if (attendees) {
+        event.attendees = attendees.split(",").map((e) => ({ email: e.trim() }));
+    }
+
+    try {
+        const res = await calendar.events.insert({
+            calendarId: "primary",
+            resource: event,
+            sendUpdates: attendees ? "all" : "none",
+        });
+
+        return {
+            success: true,
+            title: res.data.summary,
+            start_time: res.data.start.dateTime,
+            end_time: res.data.end.dateTime,
+            duration: durationMin,
+            event_id: res.data.id,
+            location: res.data.location || null,
+        };
+    } catch (err) {
+        console.error("Google Calendar add event error:", err.message);
+        return { success: false, error: err.message };
+    }
+}
 
 async function summarizeMeetingTranscript(transcript, bedrockClient) {
     const command = new ConverseCommand({
@@ -691,7 +890,7 @@ wss.on("connection", (ws) => {
                                     mediaType: "application/json",
                                 },
                                 toolConfiguration: {
-                                    tools: [WEB_SEARCH_TOOL, ZOOM_MEETING_TOOL, ZOOM_INSTANT_MEETING_TOOL, ZOOM_LIST_MEETINGS_TOOL, GOOGLE_MEET_TOOL, SUMMARIZE_MEETING_TOOL],
+                                    tools: [WEB_SEARCH_TOOL, ZOOM_MEETING_TOOL, ZOOM_INSTANT_MEETING_TOOL, ZOOM_LIST_MEETINGS_TOOL, GOOGLE_CALENDAR_LIST_TOOL, GOOGLE_CALENDAR_ADD_TOOL, GOOGLE_MEET_TOOL, SUMMARIZE_MEETING_TOOL],
                                     toolChoice: { auto: {} },
                                 },
                             },
@@ -732,7 +931,7 @@ wss.on("connection", (ws) => {
                                 promptName,
                                 contentName,
                                 content:
-                                    `You are a friendly assistant with web search, Zoom meeting, Google Meet, and meeting summary capabilities. Today's date is ${new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric", timeZone: "America/Denver" })}. The user and you will engage in a spoken dialog exchanging the transcripts of a natural real-time conversation. Keep your responses short, generally two or three sentences for chatty scenarios. When the user asks about current events, news, weather, real-time information, or anything you're unsure about, use the web_search tool to look it up. Always mention your sources briefly when using search results. When the user asks to schedule or create a Zoom meeting, use the schedule_zoom_meeting tool. Always assume the user's timezone is MST (Mountain Standard Time, UTC-7) and convert times to ISO 8601 with the MST offset. Always use the current year when scheduling meetings. When the user wants to start an instant call or join a Zoom right now, use the instant_zoom_meeting tool. When the user asks to see or list their meetings, use the list_zoom_meetings tool. When the user asks to create or schedule a Google Meet, use the create_google_meet tool. When the user asks to summarize a meeting, get meeting notes, or send a meeting summary to Slack, use the summarize_meeting tool. Ask if they want it posted to Slack. Do not read out meeting links or IDs. Ask for a topic if the user doesn't provide one.`,
+                                    `You are a friendly assistant with web search, Zoom meeting, Google Calendar, Google Meet, and meeting summary capabilities. Today's date is ${new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric", timeZone: "America/Denver" })}. The user and you will engage in a spoken dialog exchanging the transcripts of a natural real-time conversation. Keep your responses short, generally two or three sentences for chatty scenarios. When the user asks about current events, news, weather, real-time information, or anything you're unsure about, use the web_search tool to look it up. Always mention your sources briefly when using search results. When the user asks to schedule or create a Zoom meeting, use the schedule_zoom_meeting tool. Always assume the user's timezone is MST (Mountain Standard Time, UTC-7) and convert times to ISO 8601 with the MST offset. Always use the current year when scheduling meetings. When the user wants to start an instant call or join a Zoom right now, use the instant_zoom_meeting tool. When the user asks to see or list their meetings, use the list_zoom_meetings tool. When the user asks about their calendar, schedule, what meetings they have, or whether they are free, use the list_google_calendar_events tool. When the user asks to add, create, or put an event on their calendar (that is not a Google Meet), use the add_google_calendar_event tool. When the user asks to create or schedule a Google Meet, use the create_google_meet tool. When the user asks to summarize a meeting, get meeting notes, or send a meeting summary to Slack, use the summarize_meeting tool. Ask if they want it posted to Slack. Do not read out meeting links or IDs. Ask for a topic if the user doesn't provide one.`,
                             },
                         },
                     })
@@ -1434,6 +1633,169 @@ wss.on("connection", (ws) => {
                                     });
                                 } catch (toolErr) {
                                     console.error("Google Meet creation error:", toolErr);
+                                }
+                            } else if (toolName === "list_google_calendar_events") {
+                                try {
+                                    const params = JSON.parse(toolContent);
+                                    console.log("Listing Google Calendar events:", params);
+
+                                    const listResult = await listGoogleCalendarEvents(params);
+                                    console.log("Google Calendar list result:", listResult.total, "events");
+
+                                    if (ws.readyState === WebSocket.OPEN) {
+                                        ws.send(JSON.stringify({
+                                            type: "google_calendar_events",
+                                            ...listResult,
+                                        }));
+                                    }
+
+                                    const toolResultContentName = randomId();
+
+                                    pushInput({
+                                        chunk: {
+                                            bytes: Buffer.from(
+                                                JSON.stringify({
+                                                    event: {
+                                                        contentStart: {
+                                                            promptName,
+                                                            contentName: toolResultContentName,
+                                                            interactive: false,
+                                                            type: "TOOL",
+                                                            role: "TOOL",
+                                                            toolResultInputConfiguration: {
+                                                                toolUseId,
+                                                                type: "TEXT",
+                                                                textInputConfiguration: {
+                                                                    mediaType: "text/plain",
+                                                                },
+                                                            },
+                                                        },
+                                                    },
+                                                })
+                                            ),
+                                        },
+                                    });
+
+                                    pushInput({
+                                        chunk: {
+                                            bytes: Buffer.from(
+                                                JSON.stringify({
+                                                    event: {
+                                                        toolResult: {
+                                                            promptName,
+                                                            contentName: toolResultContentName,
+                                                            content: JSON.stringify(listResult),
+                                                        },
+                                                    },
+                                                })
+                                            ),
+                                        },
+                                    });
+
+                                    pushInput({
+                                        chunk: {
+                                            bytes: Buffer.from(
+                                                JSON.stringify({
+                                                    event: {
+                                                        contentEnd: {
+                                                            promptName,
+                                                            contentName: toolResultContentName,
+                                                        },
+                                                    },
+                                                })
+                                            ),
+                                        },
+                                    });
+                                } catch (toolErr) {
+                                    console.error("Google Calendar list error:", toolErr);
+                                }
+                            } else if (toolName === "add_google_calendar_event") {
+                                try {
+                                    const params = JSON.parse(toolContent);
+                                    console.log("Adding Google Calendar event:", params);
+
+                                    const addResult = await addGoogleCalendarEvent(params);
+                                    console.log("Google Calendar add result:", addResult);
+
+                                    if (ws.readyState === WebSocket.OPEN) {
+                                        ws.send(JSON.stringify({
+                                            type: "google_calendar_event_added",
+                                            ...addResult,
+                                        }));
+                                    }
+
+                                    const toolResultContentName = randomId();
+
+                                    pushInput({
+                                        chunk: {
+                                            bytes: Buffer.from(
+                                                JSON.stringify({
+                                                    event: {
+                                                        contentStart: {
+                                                            promptName,
+                                                            contentName: toolResultContentName,
+                                                            interactive: false,
+                                                            type: "TOOL",
+                                                            role: "TOOL",
+                                                            toolResultInputConfiguration: {
+                                                                toolUseId,
+                                                                type: "TEXT",
+                                                                textInputConfiguration: {
+                                                                    mediaType: "text/plain",
+                                                                },
+                                                            },
+                                                        },
+                                                    },
+                                                })
+                                            ),
+                                        },
+                                    });
+
+                                    const safeAddResult = {
+                                        success: addResult.success,
+                                        title: addResult.title,
+                                        start_time: addResult.start_time,
+                                        end_time: addResult.end_time,
+                                        duration: addResult.duration,
+                                        location: addResult.location,
+                                        conflict: addResult.conflict,
+                                        conflicts: addResult.conflicts,
+                                        message: addResult.message,
+                                        error: addResult.error,
+                                    };
+
+                                    pushInput({
+                                        chunk: {
+                                            bytes: Buffer.from(
+                                                JSON.stringify({
+                                                    event: {
+                                                        toolResult: {
+                                                            promptName,
+                                                            contentName: toolResultContentName,
+                                                            content: JSON.stringify(safeAddResult),
+                                                        },
+                                                    },
+                                                })
+                                            ),
+                                        },
+                                    });
+
+                                    pushInput({
+                                        chunk: {
+                                            bytes: Buffer.from(
+                                                JSON.stringify({
+                                                    event: {
+                                                        contentEnd: {
+                                                            promptName,
+                                                            contentName: toolResultContentName,
+                                                        },
+                                                    },
+                                                })
+                                            ),
+                                        },
+                                    });
+                                } catch (toolErr) {
+                                    console.error("Google Calendar add event error:", toolErr);
                                 }
                             }
                         } else if (json.event?.contentStart) {
