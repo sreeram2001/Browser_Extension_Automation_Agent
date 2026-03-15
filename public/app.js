@@ -23,10 +23,12 @@ let nextPlayTime = 0;
 let silenceTimer = null;
 let wakeWordRecognition = null;
 let wakeWordActive = false;
+let stopPhraseRecognition = null;
 
 const INPUT_SAMPLE_RATE = 16000;
 const OUTPUT_SAMPLE_RATE = 24000;
 const WAKE_PHRASE = "sonic";
+const STOP_PHRASE = "stop sonic";
 const SILENCE_TIMEOUT_MS = 10000; // end session after 10s of silence
 
 // ── Wake Word Detection (Web Speech API) ──
@@ -105,6 +107,57 @@ function stopWakeWordListening() {
         } catch (e) {
             // not running
         }
+    }
+}
+
+// ── Stop Phrase Detection (runs during active session) ──
+
+function startStopPhraseListening() {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) return;
+
+    stopPhraseRecognition = new SpeechRecognition();
+    stopPhraseRecognition.continuous = true;
+    stopPhraseRecognition.interimResults = true;
+    stopPhraseRecognition.lang = "en-US";
+    stopPhraseRecognition.maxAlternatives = 3;
+
+    stopPhraseRecognition.onresult = (event) => {
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+            for (let alt = 0; alt < event.results[i].length; alt++) {
+                const transcript = event.results[i][alt].transcript.toLowerCase().trim();
+                if (transcript.includes(STOP_PHRASE)) {
+                    addSystemMessage("🛑 Stop command detected.");
+                    stopRecording();
+                    return;
+                }
+            }
+        }
+    };
+
+    stopPhraseRecognition.onerror = (event) => {
+        if (event.error === "no-speech" || event.error === "aborted" || event.error === "network") {
+            if (isRecording) {
+                try { stopPhraseRecognition.start(); } catch (e) { }
+            }
+        }
+    };
+
+    stopPhraseRecognition.onend = () => {
+        if (isRecording) {
+            try { stopPhraseRecognition.start(); } catch (e) { }
+        }
+    };
+
+    try {
+        stopPhraseRecognition.start();
+    } catch (e) { }
+}
+
+function stopStopPhraseListening() {
+    if (stopPhraseRecognition) {
+        try { stopPhraseRecognition.stop(); } catch (e) { }
+        stopPhraseRecognition = null;
     }
 }
 
@@ -201,6 +254,12 @@ async function startRecording() {
                 playAudio(msg.data);
             } else if (msg.type === "text") {
                 resetSilenceTimer();
+                // Check for stop phrase in user speech
+                if (msg.role === "USER" && msg.content && msg.content.toLowerCase().includes(STOP_PHRASE)) {
+                    addSystemMessage("🛑 Stop command detected. Ending session.");
+                    stopRecording();
+                    return;
+                }
                 addTranscript(msg.role, msg.content);
             } else if (msg.type === "tool_use") {
                 resetSilenceTimer();
@@ -261,6 +320,7 @@ async function startRecording() {
         isRecording = true;
         micBtn.classList.remove("listening");
         micBtn.classList.add("active");
+        startStopPhraseListening();
     } catch (err) {
         statusEl.textContent = `Mic error: ${err.message}`;
         console.error(err);
@@ -272,6 +332,7 @@ function stopRecording() {
     isRecording = false;
     micBtn.classList.remove("active");
     clearSilenceTimer();
+    stopStopPhraseListening();
 
     bars.forEach((b) => (b.style.height = "4px"));
 
