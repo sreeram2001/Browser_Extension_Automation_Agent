@@ -420,6 +420,49 @@ const YOUTUBE_SUMMARIZE_TOOL = {
     },
 };
 
+// Tool definition for creating Google Tasks from action items
+const CREATE_GOOGLE_TASKS_TOOL = {
+    toolSpec: {
+        name: "create_google_tasks",
+        description:
+            "Create tasks in Google Tasks from a list of action items. Use this when the user asks to 'create tasks from the meeting', 'add action items to my tasks', 'turn those into tasks', or after summarizing a meeting when the user wants to track action items. You can also use this standalone when the user asks to add a task or to-do.",
+        inputSchema: {
+            json: JSON.stringify({
+                type: "object",
+                properties: {
+                    tasks: {
+                        type: "array",
+                        description: "Array of task objects to create.",
+                        items: {
+                            type: "object",
+                            properties: {
+                                title: {
+                                    type: "string",
+                                    description: "The task title or action item text.",
+                                },
+                                notes: {
+                                    type: "string",
+                                    description: "Optional notes or context for the task.",
+                                },
+                                due: {
+                                    type: "string",
+                                    description: "Optional due date in ISO 8601 format (e.g. 2025-07-20T00:00:00-07:00).",
+                                },
+                            },
+                            required: ["title"],
+                        },
+                    },
+                    task_list: {
+                        type: "string",
+                        description: "Name of the task list to add to. Defaults to the user's primary task list.",
+                    },
+                },
+                required: ["tasks"],
+            }),
+        },
+    },
+};
+
 // ── Web Grounding with LRU cache ──
 
 const groundingCache = new Map();
@@ -856,6 +899,56 @@ async function createGoogleMeet({ topic, start_time, duration, attendees, force 
     }
 }
 
+// ── Google Tasks Integration ──
+
+async function createGoogleTasks({ tasks, task_list }) {
+    const auth = getGoogleAuth();
+    const tasksApi = google.tasks({ version: "v1", auth });
+
+    try {
+        // Find or use the target task list
+        let taskListId = "@default";
+        if (task_list) {
+            const lists = await tasksApi.tasklists.list({ maxResults: 20 });
+            const match = (lists.data.items || []).find(
+                (l) => l.title.toLowerCase() === task_list.toLowerCase()
+            );
+            if (match) {
+                taskListId = match.id;
+            } else {
+                // Create the list if it doesn't exist
+                const newList = await tasksApi.tasklists.insert({
+                    requestBody: { title: task_list },
+                });
+                taskListId = newList.data.id;
+            }
+        }
+
+        const created = [];
+        for (const t of tasks) {
+            const taskBody = { title: t.title };
+            if (t.notes) taskBody.notes = t.notes;
+            if (t.due) taskBody.due = new Date(t.due).toISOString();
+
+            const res = await tasksApi.tasks.insert({
+                tasklist: taskListId,
+                requestBody: taskBody,
+            });
+
+            created.push({
+                id: res.data.id,
+                title: res.data.title,
+                due: res.data.due || null,
+            });
+        }
+
+        return { success: true, created, total: created.length };
+    } catch (err) {
+        console.error("Google Tasks error:", err.message);
+        return { success: false, error: err.message, created: [] };
+    }
+}
+
 // ── Meeting Summarization ──
 
 async function addGoogleCalendarEvent({ title, start_time, duration, description, location, attendees, force }) {
@@ -1273,7 +1366,7 @@ wss.on("connection", (ws) => {
                                     mediaType: "application/json",
                                 },
                                 toolConfiguration: {
-                                    tools: [WEB_SEARCH_TOOL, ZOOM_MEETING_TOOL, ZOOM_INSTANT_MEETING_TOOL, ZOOM_LIST_MEETINGS_TOOL, GOOGLE_CALENDAR_LIST_TOOL, GOOGLE_CALENDAR_ADD_TOOL, GOOGLE_MEET_TOOL, SUMMARIZE_MEETING_TOOL, SET_REMINDER_TOOL, YOUTUBE_SEARCH_TOOL, YOUTUBE_SUMMARIZE_TOOL],
+                                    tools: [WEB_SEARCH_TOOL, ZOOM_MEETING_TOOL, ZOOM_INSTANT_MEETING_TOOL, ZOOM_LIST_MEETINGS_TOOL, GOOGLE_CALENDAR_LIST_TOOL, GOOGLE_CALENDAR_ADD_TOOL, GOOGLE_MEET_TOOL, SUMMARIZE_MEETING_TOOL, SET_REMINDER_TOOL, YOUTUBE_SEARCH_TOOL, YOUTUBE_SUMMARIZE_TOOL, CREATE_GOOGLE_TASKS_TOOL],
                                     toolChoice: { auto: {} },
                                 },
                             },
@@ -1314,7 +1407,7 @@ wss.on("connection", (ws) => {
                                 promptName,
                                 contentName,
                                 content:
-                                    `You are a friendly assistant with web search, Zoom meeting, Google Calendar, Google Meet, reminders, YouTube, and meeting summary capabilities. Today's date is ${new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric", timeZone: "America/Denver" })}. The current time is ${new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", timeZone: "America/Denver" })} MST. The user and you will engage in a spoken dialog exchanging the transcripts of a natural real-time conversation. Keep your responses short, generally two or three sentences for chatty scenarios. When the user asks about current events, news, weather, real-time information, or anything you're unsure about, use the web_search tool to look it up. Always mention your sources briefly when using search results. When the user asks to schedule or create a Zoom meeting, use the schedule_zoom_meeting tool. Always assume the user's timezone is MST (Mountain Standard Time, UTC-7) and convert times to ISO 8601 with the MST offset. Always use the current year when scheduling meetings. When the user wants to start an instant call or join a Zoom right now, use the instant_zoom_meeting tool. When the user asks to see or list their meetings, use the list_zoom_meetings tool. When the user asks about their calendar, schedule, what meetings they have, or whether they are free, use the list_google_calendar_events tool. When the user asks to add, create, or put an event on their calendar (that is not a Google Meet), use the add_google_calendar_event tool. When the user asks to create or schedule a Google Meet, use the create_google_meet tool. When the user asks to summarize a meeting, get meeting notes, or send a meeting summary to Slack, use the summarize_meeting tool. Ask if they want it posted to Slack. When the user asks to set a reminder, be reminded about something, or set a timer, use the set_reminder tool. If they say "remind me in X minutes", set minutes to X. If they say "remind me at 3pm", convert to ISO 8601 MST and use remind_at. When the user asks to find or search for a YouTube video, use the youtube_search tool. When the user asks to summarize a YouTube video or wants to know what a video is about, use the youtube_summarize tool. Do not read out meeting links, IDs, or full URLs. Ask for a topic if the user doesn't provide one.`,
+                                    `You are a friendly assistant with web search, Zoom meeting, Google Calendar, Google Meet, reminders, YouTube, and meeting summary capabilities. Today's date is ${new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric", timeZone: "America/Denver" })}. The current time is ${new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", timeZone: "America/Denver" })} MST. The user and you will engage in a spoken dialog exchanging the transcripts of a natural real-time conversation. Keep your responses short, generally two or three sentences for chatty scenarios. When the user asks about current events, news, weather, real-time information, or anything you're unsure about, use the web_search tool to look it up. Always mention your sources briefly when using search results. When the user asks to schedule or create a Zoom meeting, use the schedule_zoom_meeting tool. Always assume the user's timezone is MST (Mountain Standard Time, UTC-7) and convert times to ISO 8601 with the MST offset. Always use the current year when scheduling meetings. When the user wants to start an instant call or join a Zoom right now, use the instant_zoom_meeting tool. When the user asks to see or list their meetings, use the list_zoom_meetings tool. When the user asks about their calendar, schedule, what meetings they have, or whether they are free, use the list_google_calendar_events tool. When the user asks to add, create, or put an event on their calendar (that is not a Google Meet), use the add_google_calendar_event tool. When the user asks to create or schedule a Google Meet, use the create_google_meet tool. When the user asks to summarize a meeting, get meeting notes, or send a meeting summary to Slack, use the summarize_meeting tool. Ask if they want it posted to Slack. When the user asks to set a reminder, be reminded about something, or set a timer, use the set_reminder tool. If they say "remind me in X minutes", set minutes to X. If they say "remind me at 3pm", convert to ISO 8601 MST and use remind_at. When the user asks to find or search for a YouTube video, use the youtube_search tool. When the user asks to summarize a YouTube video or wants to know what a video is about, use the youtube_summarize tool. When the user asks to create tasks, add action items to their task list, turn meeting action items into tasks, or add a to-do, use the create_google_tasks tool. After summarizing a meeting, proactively ask if the user wants to create Google Tasks from the action items. Do not read out meeting links, IDs, or full URLs. Ask for a topic if the user doesn't provide one.`,
                             },
                         },
                     })
@@ -2265,6 +2358,81 @@ wss.on("connection", (ws) => {
                                     });
                                 } catch (toolErr) {
                                     console.error("Set reminder error:", toolErr);
+                                }
+                            } else if (toolName === "create_google_tasks") {
+                                try {
+                                    const params = JSON.parse(toolContent);
+                                    console.log("Creating Google Tasks:", params.tasks?.length, "tasks");
+
+                                    const tasksResult = await createGoogleTasks(params);
+                                    console.log("Google Tasks result:", tasksResult.total, "created");
+
+                                    if (ws.readyState === WebSocket.OPEN) {
+                                        ws.send(JSON.stringify({
+                                            type: "google_tasks_created",
+                                            ...tasksResult,
+                                        }));
+                                    }
+
+                                    const toolResultContentName = randomId();
+
+                                    pushInput({
+                                        chunk: {
+                                            bytes: Buffer.from(
+                                                JSON.stringify({
+                                                    event: {
+                                                        contentStart: {
+                                                            promptName,
+                                                            contentName: toolResultContentName,
+                                                            interactive: false,
+                                                            type: "TOOL",
+                                                            role: "TOOL",
+                                                            toolResultInputConfiguration: {
+                                                                toolUseId,
+                                                                type: "TEXT",
+                                                                textInputConfiguration: {
+                                                                    mediaType: "text/plain",
+                                                                },
+                                                            },
+                                                        },
+                                                    },
+                                                })
+                                            ),
+                                        },
+                                    });
+
+                                    pushInput({
+                                        chunk: {
+                                            bytes: Buffer.from(
+                                                JSON.stringify({
+                                                    event: {
+                                                        toolResult: {
+                                                            promptName,
+                                                            contentName: toolResultContentName,
+                                                            content: JSON.stringify(tasksResult),
+                                                        },
+                                                    },
+                                                })
+                                            ),
+                                        },
+                                    });
+
+                                    pushInput({
+                                        chunk: {
+                                            bytes: Buffer.from(
+                                                JSON.stringify({
+                                                    event: {
+                                                        contentEnd: {
+                                                            promptName,
+                                                            contentName: toolResultContentName,
+                                                        },
+                                                    },
+                                                })
+                                            ),
+                                        },
+                                    });
+                                } catch (toolErr) {
+                                    console.error("Google Tasks error:", toolErr);
                                 }
                             } else if (toolName === "youtube_search") {
                                 try {

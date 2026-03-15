@@ -19,6 +19,7 @@ const TOKEN_PATH = path.join(__dirname, "google-token.json");
 const SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
     "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/tasks",
 ];
 const REDIRECT_PORT = 3001;
 const REDIRECT_URI = `http://localhost:${REDIRECT_PORT}/oauth2callback`;

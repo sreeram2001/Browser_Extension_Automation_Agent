@@ -301,6 +301,9 @@ async function startRecording() {
             } else if (msg.type === "youtube_summary") {
                 resetSilenceTimer();
                 addYouTubeSummary(msg);
+            } else if (msg.type === "google_tasks_created") {
+                resetSilenceTimer();
+                addGoogleTasksCreated(msg);
             } else if (msg.type === "error") {
                 statusEl.textContent = `Error: ${msg.message}`;
             } else if (msg.type === "session_end") {
@@ -680,6 +683,31 @@ function addYouTubeSummary(data) {
         div.innerHTML =
             `<span class="label" style="color: #ef4444;">▶ YouTube</span>` +
             `<div class="zoom-error">${escapeHtml(data.error || "Failed to summarize video.")}</div>`;
+    }
+
+    transcriptEl.appendChild(div);
+    transcriptEl.scrollTop = transcriptEl.scrollHeight;
+}
+
+function addGoogleTasksCreated(data) {
+    const div = document.createElement("div");
+    div.className = "msg calendar-added";
+
+    if (data.success && data.created && data.created.length > 0) {
+        let html = `<span class="label" style="color: #34d399;">✅ ${data.total} Task${data.total !== 1 ? "s" : ""} Created</span>`;
+        data.created.forEach((t) => {
+            html += `<div style="margin: 4px 0; font-size: 0.86rem; color: #e0e2eb;">• ${escapeHtml(t.title)}`;
+            if (t.due) {
+                const d = new Date(t.due).toLocaleDateString([], { month: "short", day: "numeric" });
+                html += ` <span style="color: #6b7280; font-size: 0.76rem;">due ${d}</span>`;
+            }
+            html += `</div>`;
+        });
+        div.innerHTML = html;
+    } else {
+        div.innerHTML =
+            `<span class="label" style="color: #34d399;">📋 Google Tasks</span>` +
+            `<div class="zoom-error">Failed: ${escapeHtml(data.error || "Unknown error")}</div>`;
     }
 
     transcriptEl.appendChild(div);
