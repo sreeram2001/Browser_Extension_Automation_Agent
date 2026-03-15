@@ -13,6 +13,7 @@ const bars = visualizerEl.querySelectorAll(".bar");
 
 // ── State ──
 let ws = null;
+let assistantTextSeen = new Set();
 let mediaStream = null;
 let audioContext = null;
 let processorNode = null;
@@ -203,6 +204,7 @@ async function startRecording() {
                 addTranscript(msg.role, msg.content);
             } else if (msg.type === "tool_use") {
                 resetSilenceTimer();
+                assistantTextSeen.clear();
                 if (msg.toolName === "schedule_zoom_meeting") {
                     addSystemMessage("📅 Creating Zoom meeting...");
                 } else {
@@ -223,9 +225,16 @@ async function startRecording() {
             } else if (msg.type === "google_meet") {
                 resetSilenceTimer();
                 addGoogleMeet(msg);
+            } else if (msg.type === "google_calendar_events") {
+                resetSilenceTimer();
+                addGoogleCalendarEvents(msg);
+            } else if (msg.type === "google_calendar_event_added") {
+                resetSilenceTimer();
+                addGoogleCalendarEventAdded(msg);
             } else if (msg.type === "error") {
                 statusEl.textContent = `Error: ${msg.message}`;
             } else if (msg.type === "session_end") {
+                assistantTextSeen.clear();
                 statusEl.textContent = "Session ended.";
             }
         };
@@ -310,6 +319,38 @@ function addTranscript(role, content) {
     if (!content || content.trim() === "") return;
     if (content.includes('"interrupted"')) return;
 
+    // Nova Sonic sends the text transcript alongside audio. It often sends
+    // the same content multiple times (exact or as a growing cumulative string).
+    // Deduplicate by checking if we've already shown this exact text or if
+    // a previously shown text already contains this content.
+    if (role === "ASSISTANT") {
+        const trimmed = content.trim();
+        // Skip if we've seen this exact text
+        for (const seen of assistantTextSeen) {
+            if (seen === trimmed) return;
+            // Skip if a previous message already contains this text (subset)
+            if (seen.includes(trimmed)) return;
+        }
+        // If this new text contains a previous message, remove the old one from DOM
+        // (it was a partial that's now superseded by the full version)
+        for (const seen of assistantTextSeen) {
+            if (trimmed.includes(seen)) {
+                assistantTextSeen.delete(seen);
+                // Remove the old partial div from transcript
+                const msgs = transcriptEl.querySelectorAll(".msg.assistant");
+                for (const m of msgs) {
+                    if (m.textContent.replace("Assistant", "").trim() === seen) {
+                        m.remove();
+                        break;
+                    }
+                }
+            }
+        }
+        assistantTextSeen.add(trimmed);
+    } else {
+        assistantTextSeen.clear();
+    }
+
     const roleLabel = role === "USER" ? "You" : "Assistant";
     const cssClass = role === "USER" ? "user" : "assistant";
 
@@ -381,15 +422,15 @@ function addZoomMeetingsList(data) {
         let html = `<span class="label">📋 Upcoming Zoom Meetings (${data.total})</span>`;
         data.meetings.forEach((m) => {
             const time = m.start_time === "instant" ? "Instant" : new Date(m.start_time).toLocaleString();
-            html += `<div style="margin: 8px 0; padding: 6px 0; border-bottom: 1px solid #2a2a3e;">`;
+            html += `<div style="margin: 8px 0; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.04);">`;
             html += `<div class="zoom-topic">${escapeHtml(m.topic)}</div>`;
-            html += `<div style="font-size: 0.78rem; color: #888;">${time} · ${m.duration} min</div>`;
+            html += `<div style="font-size: 0.76rem; color: #6b7280;">${time} · ${m.duration} min</div>`;
             html += `<a href="${escapeHtml(m.join_url)}" target="_blank" rel="noopener" class="zoom-link" style="margin-top: 4px;">Join</a>`;
             html += `</div>`;
         });
         div.innerHTML = html;
     } else if (data.success) {
-        div.innerHTML = `<span class="label">📋 Zoom Meetings</span><div style="color: #888;">No upcoming meetings found.</div>`;
+        div.innerHTML = `<span class="label">📋 Zoom Meetings</span><div style="color: #6b7280;">No upcoming meetings found.</div>`;
     } else {
         div.innerHTML = `<span class="label">📋 Zoom</span><div class="zoom-error">Failed: ${escapeHtml(data.error || "Unknown error")}</div>`;
     }
@@ -401,18 +442,93 @@ function addZoomMeetingsList(data) {
 function addGoogleMeet(data) {
     const div = document.createElement("div");
     div.className = "msg zoom-meeting";
-    div.style.borderLeftColor = "#34a853";
+    div.style.borderLeftColor = "#a78bfa";
 
     if (data.success) {
         const time = new Date(data.start_time).toLocaleString();
         div.innerHTML =
-            `<span class="label" style="color: #34a853;">📹 Google Meet Created</span>` +
+            `<span class="label" style="color: #a78bfa;">📹 Google Meet Created</span>` +
             `<div class="zoom-topic">${escapeHtml(data.topic)}</div>` +
-            `<div style="font-size: 0.78rem; color: #888;">${time} · ${data.duration} min</div>` +
-            `<a href="${escapeHtml(data.meet_link)}" target="_blank" rel="noopener" class="zoom-link" style="background: #34a853;">Join Google Meet</a>`;
+            `<div style="font-size: 0.76rem; color: #6b7280;">${time} · ${data.duration} min</div>` +
+            `<a href="${escapeHtml(data.meet_link)}" target="_blank" rel="noopener" class="zoom-link">Join Google Meet</a>`;
     } else {
         div.innerHTML =
-            `<span class="label" style="color: #34a853;">📹 Google Meet</span>` +
+            `<span class="label" style="color: #a78bfa;">📹 Google Meet</span>` +
+            `<div class="zoom-error">Failed: ${escapeHtml(data.error || "Unknown error")}</div>`;
+    }
+
+    transcriptEl.appendChild(div);
+    transcriptEl.scrollTop = transcriptEl.scrollHeight;
+}
+
+function addGoogleCalendarEvents(data) {
+    const div = document.createElement("div");
+    div.className = "msg calendar-events";
+
+    if (data.success && data.events && data.events.length > 0) {
+        let html = `<span class="label" style="color: #34d399;">📅 Calendar — ${data.total} event${data.total !== 1 ? "s" : ""}</span>`;
+        data.events.forEach((e) => {
+            const start = new Date(e.start);
+            const end = new Date(e.end);
+            const timeStr = start.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+            const endStr = end.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+
+            html += `<div class="calendar-event-item">`;
+            html += `<div class="calendar-event-time">${timeStr}</div>`;
+            html += `<div class="calendar-event-details">`;
+            html += `<div class="calendar-event-title">${escapeHtml(e.title)}</div>`;
+            html += `<div class="calendar-event-meta">${timeStr} – ${endStr}`;
+            if (e.location) html += ` · ${escapeHtml(e.location)}`;
+            html += `</div>`;
+            if (e.meet_link) {
+                html += `<a href="${escapeHtml(e.meet_link)}" target="_blank" rel="noopener" class="calendar-event-meet">Join Meet</a>`;
+            }
+            html += `</div></div>`;
+        });
+        div.innerHTML = html;
+    } else if (data.success) {
+        div.innerHTML =
+            `<span class="label" style="color: #34d399;">📅 Calendar</span>` +
+            `<div class="calendar-empty">No events found for this time period.</div>`;
+    } else {
+        div.innerHTML =
+            `<span class="label" style="color: #34d399;">📅 Calendar</span>` +
+            `<div class="zoom-error">Failed: ${escapeHtml(data.error || "Unknown error")}</div>`;
+    }
+
+    transcriptEl.appendChild(div);
+    transcriptEl.scrollTop = transcriptEl.scrollHeight;
+}
+
+function addGoogleCalendarEventAdded(data) {
+    const div = document.createElement("div");
+    div.className = "msg calendar-added";
+
+    if (data.success) {
+        const start = new Date(data.start_time);
+        const end = new Date(data.end_time);
+        const dateStr = start.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
+        const timeStr = start.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+        const endStr = end.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+
+        let html = `<span class="label" style="color: #34d399;">✅ Event Added</span>`;
+        html += `<div class="zoom-topic">${escapeHtml(data.title)}</div>`;
+        html += `<div style="font-size: 0.76rem; color: #6b7280;">${dateStr} · ${timeStr} – ${endStr}`;
+        if (data.location) html += ` · ${escapeHtml(data.location)}`;
+        html += `</div>`;
+        div.innerHTML = html;
+    } else if (data.conflict && data.conflicts) {
+        let html = `<span class="label" style="color: #fbbf24;">⚠️ Scheduling Conflict</span>`;
+        data.conflicts.forEach((c) => {
+            const s = new Date(c.start).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+            const e = new Date(c.end).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+            html += `<div style="font-size: 0.82rem; margin: 4px 0; color: #d8dae5;">${escapeHtml(c.title)} <span style="color: #6b7280;">${s} – ${e}</span></div>`;
+        });
+        div.innerHTML = html;
+        div.style.borderLeftColor = "#fbbf24";
+    } else {
+        div.innerHTML =
+            `<span class="label" style="color: #34d399;">📅 Calendar</span>` +
             `<div class="zoom-error">Failed: ${escapeHtml(data.error || "Unknown error")}</div>`;
     }
 
@@ -423,15 +539,15 @@ function addGoogleMeet(data) {
 function addMeetingSummary(data) {
     const div = document.createElement("div");
     div.className = "msg search-results";
-    div.style.borderLeftColor = "#a0d995";
+    div.style.borderLeftColor = "#34d399";
 
-    let html = `<span class="label">📋 Meeting Summary</span>`;
-    html += `<div style="font-size: 0.8rem; color: #888; margin-bottom: 6px;">${escapeHtml(data.fileName)}</div>`;
-    html += `<div style="white-space: pre-wrap; font-size: 0.85rem; line-height: 1.5;">${escapeHtml(data.summary)}</div>`;
+    let html = `<span class="label" style="color: #34d399;">📋 Meeting Summary</span>`;
+    html += `<div style="font-size: 0.78rem; color: #6b7280; margin-bottom: 6px;">${escapeHtml(data.fileName)}</div>`;
+    html += `<div style="white-space: pre-wrap; font-size: 0.85rem; line-height: 1.55;">${escapeHtml(data.summary)}</div>`;
     if (data.slack_posted) {
-        html += `<div style="margin-top: 8px; font-size: 0.78rem; color: #a0d995;">✅ Posted to Slack</div>`;
+        html += `<div style="margin-top: 8px; font-size: 0.76rem; color: #34d399;">✅ Posted to Slack</div>`;
     }
-    html += `<button class="download-summary-btn" style="margin-top: 10px; padding: 4px 14px; font-size: 0.82rem; border-radius: 4px; border: 1px solid #a0d995; background: transparent; color: #a0d995; cursor: pointer; transition: background 0.2s;">⬇ Download Notes</button>`;
+    html += `<button class="download-summary-btn" style="margin-top: 10px; padding: 5px 14px; font-size: 0.8rem; border-radius: 20px; border: 1px solid #a78bfa; background: transparent; color: #a78bfa; cursor: pointer; transition: all 0.2s;">⬇ Download Notes</button>`;
 
     div.innerHTML = html;
 

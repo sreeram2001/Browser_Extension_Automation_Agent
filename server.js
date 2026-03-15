@@ -1445,6 +1445,7 @@ wss.on("connection", (ws) => {
 
                                     // 1. Fetch transcript from Google Drive
                                     const transcriptResult = await fetchLatestMeetTranscript();
+                                    console.log("Transcript fetch result:", transcriptResult.success, transcriptResult.error || "");
                                     let toolResponse;
 
                                     if (!transcriptResult.success) {
@@ -1460,9 +1461,10 @@ wss.on("connection", (ws) => {
                                         };
 
                                         // 3. Post to Slack if requested
-                                        if (params.post_to_slack) {
+                                        if (params.post_to_slack === true || params.post_to_slack === "true") {
                                             const slackMessage = `📋 *Meeting Summary*\n_${transcriptResult.fileName}_\n\n${summary}`;
                                             const slackResult = await postToSlack(slackMessage);
+                                            console.log("Slack post result:", slackResult);
                                             toolResponse.slack_posted = slackResult.success;
                                             if (!slackResult.success) {
                                                 toolResponse.slack_error = slackResult.error;
