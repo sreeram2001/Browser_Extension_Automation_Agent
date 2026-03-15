@@ -28,6 +28,107 @@ const GROUNDING_MODEL_ID = process.env.GROUNDING_MODEL_ID || "us.amazon.nova-pre
 const AWS_PROFILE = process.env.AWS_PROFILE || "uoc";
 const VOICE_ID = process.env.VOICE_ID || "tiffany";
 
+// ── Reminder Infrastructure ──
+const REMINDERS_PATH = path.join(__dirname, "reminders.json");
+const activeTimers = new Map(); // id -> timeout handle
+const activeClients = new Set(); // track connected websockets
+
+function loadReminders() {
+    try {
+        if (fs.existsSync(REMINDERS_PATH)) {
+            return JSON.parse(fs.readFileSync(REMINDERS_PATH, "utf-8"));
+        }
+    } catch (e) {
+        console.error("Error loading reminders:", e.message);
+    }
+    return [];
+}
+
+function saveReminders(reminders) {
+    fs.writeFileSync(REMINDERS_PATH, JSON.stringify(reminders, null, 2));
+}
+
+function broadcastReminder(reminder) {
+    const msg = JSON.stringify({
+        type: "reminder",
+        id: reminder.id,
+        message: reminder.message,
+        fireAt: reminder.fireAt,
+    });
+    for (const client of activeClients) {
+        if (client.readyState === WebSocket.OPEN) {
+            client.send(msg);
+        }
+    }
+}
+
+function scheduleReminder(reminder) {
+    const delay = new Date(reminder.fireAt).getTime() - Date.now();
+    if (delay <= 0) {
+        // Already past — deliver immediately if clients connected, then remove
+        broadcastReminder(reminder);
+        removeReminder(reminder.id);
+        return;
+    }
+    const timer = setTimeout(() => {
+        console.log(`🔔 Reminder fired: ${reminder.message}`);
+        broadcastReminder(reminder);
+        removeReminder(reminder.id);
+    }, delay);
+    activeTimers.set(reminder.id, timer);
+}
+
+function removeReminder(id) {
+    if (activeTimers.has(id)) {
+        clearTimeout(activeTimers.get(id));
+        activeTimers.delete(id);
+    }
+    const reminders = loadReminders().filter((r) => r.id !== id);
+    saveReminders(reminders);
+}
+
+function addReminder({ message, minutes, remind_at }) {
+    let fireAt;
+    if (remind_at) {
+        fireAt = new Date(remind_at).toISOString();
+    } else {
+        const mins = minutes || 5;
+        fireAt = new Date(Date.now() + mins * 60 * 1000).toISOString();
+    }
+
+    const reminder = {
+        id: crypto.randomUUID(),
+        message,
+        fireAt,
+        createdAt: new Date().toISOString(),
+    };
+
+    const reminders = loadReminders();
+    reminders.push(reminder);
+    saveReminders(reminders);
+    scheduleReminder(reminder);
+
+    return reminder;
+}
+
+// Restore reminders on server start
+(function restoreReminders() {
+    const reminders = loadReminders();
+    const now = Date.now();
+    const pending = [];
+    for (const r of reminders) {
+        if (new Date(r.fireAt).getTime() > now) {
+            scheduleReminder(r);
+            pending.push(r);
+        }
+    }
+    // Clean up expired ones
+    saveReminders(pending);
+    if (pending.length > 0) {
+        console.log(`Restored ${pending.length} pending reminder(s)`);
+    }
+})();
+
 // Tool definition that Nova Sonic will use to request web lookups
 const WEB_SEARCH_TOOL = {
     toolSpec: {
@@ -239,6 +340,81 @@ const SUMMARIZE_MEETING_TOOL = {
                     },
                 },
                 required: [],
+            }),
+        },
+    },
+};
+
+// Tool definition for setting a quick reminder
+const SET_REMINDER_TOOL = {
+    toolSpec: {
+        name: "set_reminder",
+        description:
+            "Set a reminder that will alert the user after a specified delay or at a specific time. Use this when the user says things like 'remind me in 5 minutes', 'remind me at 3pm to call John', 'set a timer for 10 minutes', or 'remind me to take a break in 30 minutes'. Do NOT use this for calendar events — use add_google_calendar_event instead.",
+        inputSchema: {
+            json: JSON.stringify({
+                type: "object",
+                properties: {
+                    message: {
+                        type: "string",
+                        description: "What to remind the user about.",
+                    },
+                    minutes: {
+                        type: "number",
+                        description: "Number of minutes from now to trigger the reminder. Use this OR remind_at, not both.",
+                    },
+                    remind_at: {
+                        type: "string",
+                        description: "Specific time to remind in ISO 8601 format with MST offset. Use this OR minutes, not both.",
+                    },
+                },
+                required: ["message"],
+            }),
+        },
+    },
+};
+
+// Tool definition for searching YouTube videos
+const YOUTUBE_SEARCH_TOOL = {
+    toolSpec: {
+        name: "youtube_search",
+        description:
+            "Search YouTube for videos. Use this when the user asks to find a video, look up a tutorial, or search YouTube for something. Returns a list of videos with titles, channels, and links.",
+        inputSchema: {
+            json: JSON.stringify({
+                type: "object",
+                properties: {
+                    query: {
+                        type: "string",
+                        description: "The search query.",
+                    },
+                    max_results: {
+                        type: "number",
+                        description: "Number of results to return. Defaults to 5.",
+                    },
+                },
+                required: ["query"],
+            }),
+        },
+    },
+};
+
+// Tool definition for summarizing a YouTube video transcript
+const YOUTUBE_SUMMARIZE_TOOL = {
+    toolSpec: {
+        name: "youtube_summarize",
+        description:
+            "Fetch the transcript/captions of a YouTube video and summarize it. Use this when the user asks to summarize a YouTube video, wants to know what a video is about, or says 'summarize this video'. Requires a YouTube video URL or video ID.",
+        inputSchema: {
+            json: JSON.stringify({
+                type: "object",
+                properties: {
+                    video_url: {
+                        type: "string",
+                        description: "YouTube video URL or video ID (e.g. https://youtube.com/watch?v=abc123 or just abc123).",
+                    },
+                },
+                required: ["video_url"],
             }),
         },
     },
@@ -768,6 +944,212 @@ ${transcript}`,
     return summary || "Failed to generate summary.";
 }
 
+// ── YouTube Integration ──
+
+function extractVideoId(input) {
+    if (!input) return null;
+    // Handle various YouTube URL formats
+    const patterns = [
+        /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/v\/)([a-zA-Z0-9_-]{11})/,
+        /^([a-zA-Z0-9_-]{11})$/, // bare video ID
+    ];
+    for (const p of patterns) {
+        const match = input.match(p);
+        if (match) return match[1];
+    }
+    return null;
+}
+
+async function searchYouTube(query, maxResults) {
+    const apiKey = process.env.YOUTUBE_API_KEY;
+
+    if (!apiKey) {
+        // Fallback: try OAuth (needs youtube.readonly scope)
+        try {
+            const auth = getGoogleAuth();
+            const youtube = google.youtube({ version: "v3", auth });
+            const res = await youtube.search.list({
+                part: "snippet",
+                q: query,
+                type: "video",
+                maxResults: maxResults || 5,
+            });
+            const videos = (res.data.items || []).map((item) => ({
+                video_id: item.id.videoId,
+                title: item.snippet.title,
+                channel: item.snippet.channelTitle,
+                description: item.snippet.description,
+                url: `https://www.youtube.com/watch?v=${item.id.videoId}`,
+                thumbnail: item.snippet.thumbnails?.medium?.url || null,
+            }));
+            return { success: true, videos, total: videos.length };
+        } catch (err) {
+            console.error("YouTube search error:", err.message);
+            return { success: false, error: "YouTube API key not configured and OAuth lacks youtube scope. Add YOUTUBE_API_KEY to .env.", videos: [] };
+        }
+    }
+
+    const youtube = google.youtube({ version: "v3", auth: apiKey });
+
+    try {
+        const res = await youtube.search.list({
+            part: "snippet",
+            q: query,
+            type: "video",
+            maxResults: maxResults || 5,
+        });
+
+        const videos = (res.data.items || []).map((item) => ({
+            video_id: item.id.videoId,
+            title: item.snippet.title,
+            channel: item.snippet.channelTitle,
+            description: item.snippet.description,
+            url: `https://www.youtube.com/watch?v=${item.id.videoId}`,
+            thumbnail: item.snippet.thumbnails?.medium?.url || null,
+        }));
+
+        return { success: true, videos, total: videos.length };
+    } catch (err) {
+        console.error("YouTube search error:", err.message);
+        return { success: false, error: err.message, videos: [] };
+    }
+}
+
+function decodeXmlEntities(str) {
+    return str
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&apos;/g, "'")
+        .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
+        .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(parseInt(dec, 10)));
+}
+
+async function summarizeYouTubeVideo(videoUrl, bedrockClient) {
+    const videoId = extractVideoId(videoUrl);
+    if (!videoId) {
+        return { success: false, error: "Could not extract video ID from the provided URL." };
+    }
+
+    // Fetch video metadata
+    let videoTitle = "Unknown Video";
+    try {
+        const auth = getGoogleAuth();
+        const youtube = google.youtube({ version: "v3", auth });
+        const meta = await youtube.videos.list({ part: "snippet", id: videoId });
+        if (meta.data.items && meta.data.items.length > 0) {
+            videoTitle = meta.data.items[0].snippet.title;
+        }
+    } catch (e) {
+        console.error("YouTube metadata fetch error:", e.message);
+    }
+
+    // Fetch transcript via YouTube's innertube API
+    let transcript;
+    try {
+        const playerResp = await fetch("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "User-Agent": "com.google.android.youtube/20.10.38 (Linux; U; Android 14)",
+            },
+            body: JSON.stringify({
+                context: { client: { clientName: "ANDROID", clientVersion: "20.10.38" } },
+                videoId,
+            }),
+        });
+
+        if (!playerResp.ok) {
+            return { success: false, error: "Failed to fetch video data from YouTube." };
+        }
+
+        const playerData = await playerResp.json();
+        const captionTracks = playerData?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+
+        if (!Array.isArray(captionTracks) || captionTracks.length === 0) {
+            return { success: false, error: "No captions available for this video." };
+        }
+
+        const trackUrl = captionTracks[0].baseUrl;
+        const captionResp = await fetch(trackUrl, {
+            headers: { "User-Agent": "Mozilla/5.0" },
+        });
+
+        if (!captionResp.ok) {
+            return { success: false, error: "Failed to fetch captions." };
+        }
+
+        const captionXml = await captionResp.text();
+
+        // Parse XML captions — handles both <text> and <p><s> formats
+        const textMatches = [...captionXml.matchAll(/<text[^>]*>([^<]*)<\/text>/g)];
+        if (textMatches.length > 0) {
+            transcript = textMatches.map((m) => decodeXmlEntities(m[1])).join(" ");
+        } else {
+            const pMatches = [...captionXml.matchAll(/<p[^>]*>([\s\S]*?)<\/p>/g)];
+            transcript = pMatches.map((m) => {
+                const inner = m[1].replace(/<[^>]+>/g, "");
+                return decodeXmlEntities(inner);
+            }).join(" ");
+        }
+    } catch (err) {
+        console.error("YouTube transcript error:", err.message);
+        return { success: false, error: "Could not fetch transcript. The video may not have captions available." };
+    }
+
+    if (!transcript || transcript.trim().length === 0) {
+        return { success: false, error: "Video transcript is empty." };
+    }
+
+    // Truncate if very long (keep first ~15k chars)
+    const trimmed = transcript.length > 15000 ? transcript.substring(0, 15000) + "..." : transcript;
+
+    // Summarize with Nova
+    try {
+        const command = new ConverseCommand({
+            modelId: GROUNDING_MODEL_ID,
+            messages: [
+                {
+                    role: "user",
+                    content: [
+                        {
+                            text: `Summarize the following YouTube video transcript concisely. Include:
+- **Overview**: 2-3 sentence summary of what the video covers
+- **Key Points**: bullet points of the main topics discussed
+- **Takeaways**: any actionable insights or conclusions
+
+Video: "${videoTitle}"
+
+Transcript:
+${trimmed}`,
+                        },
+                    ],
+                },
+            ],
+        });
+
+        const response = await bedrockClient.send(command);
+        const contentList = response.output?.message?.content || [];
+        let summary = "";
+        for (const block of contentList) {
+            if (block.text) summary += block.text;
+        }
+
+        return {
+            success: true,
+            video_id: videoId,
+            title: videoTitle,
+            url: `https://www.youtube.com/watch?v=${videoId}`,
+            summary: summary || "Failed to generate summary.",
+        };
+    } catch (err) {
+        console.error("YouTube summarization error:", err.message);
+        return { success: false, error: err.message };
+    }
+}
+
 // ── Slack Integration ──
 
 function postToSlack(message) {
@@ -837,6 +1219,7 @@ function sanitizeMeetingResult(result) {
 
 wss.on("connection", (ws) => {
     console.log("Client connected");
+    activeClients.add(ws);
 
     let bedrockClient = createBedrockClient();
     let isActive = false;
@@ -890,7 +1273,7 @@ wss.on("connection", (ws) => {
                                     mediaType: "application/json",
                                 },
                                 toolConfiguration: {
-                                    tools: [WEB_SEARCH_TOOL, ZOOM_MEETING_TOOL, ZOOM_INSTANT_MEETING_TOOL, ZOOM_LIST_MEETINGS_TOOL, GOOGLE_CALENDAR_LIST_TOOL, GOOGLE_CALENDAR_ADD_TOOL, GOOGLE_MEET_TOOL, SUMMARIZE_MEETING_TOOL],
+                                    tools: [WEB_SEARCH_TOOL, ZOOM_MEETING_TOOL, ZOOM_INSTANT_MEETING_TOOL, ZOOM_LIST_MEETINGS_TOOL, GOOGLE_CALENDAR_LIST_TOOL, GOOGLE_CALENDAR_ADD_TOOL, GOOGLE_MEET_TOOL, SUMMARIZE_MEETING_TOOL, SET_REMINDER_TOOL, YOUTUBE_SEARCH_TOOL, YOUTUBE_SUMMARIZE_TOOL],
                                     toolChoice: { auto: {} },
                                 },
                             },
@@ -931,7 +1314,7 @@ wss.on("connection", (ws) => {
                                 promptName,
                                 contentName,
                                 content:
-                                    `You are a friendly assistant with web search, Zoom meeting, Google Calendar, Google Meet, and meeting summary capabilities. Today's date is ${new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric", timeZone: "America/Denver" })}. The user and you will engage in a spoken dialog exchanging the transcripts of a natural real-time conversation. Keep your responses short, generally two or three sentences for chatty scenarios. When the user asks about current events, news, weather, real-time information, or anything you're unsure about, use the web_search tool to look it up. Always mention your sources briefly when using search results. When the user asks to schedule or create a Zoom meeting, use the schedule_zoom_meeting tool. Always assume the user's timezone is MST (Mountain Standard Time, UTC-7) and convert times to ISO 8601 with the MST offset. Always use the current year when scheduling meetings. When the user wants to start an instant call or join a Zoom right now, use the instant_zoom_meeting tool. When the user asks to see or list their meetings, use the list_zoom_meetings tool. When the user asks about their calendar, schedule, what meetings they have, or whether they are free, use the list_google_calendar_events tool. When the user asks to add, create, or put an event on their calendar (that is not a Google Meet), use the add_google_calendar_event tool. When the user asks to create or schedule a Google Meet, use the create_google_meet tool. When the user asks to summarize a meeting, get meeting notes, or send a meeting summary to Slack, use the summarize_meeting tool. Ask if they want it posted to Slack. Do not read out meeting links or IDs. Ask for a topic if the user doesn't provide one.`,
+                                    `You are a friendly assistant with web search, Zoom meeting, Google Calendar, Google Meet, reminders, YouTube, and meeting summary capabilities. Today's date is ${new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric", timeZone: "America/Denver" })}. The current time is ${new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", timeZone: "America/Denver" })} MST. The user and you will engage in a spoken dialog exchanging the transcripts of a natural real-time conversation. Keep your responses short, generally two or three sentences for chatty scenarios. When the user asks about current events, news, weather, real-time information, or anything you're unsure about, use the web_search tool to look it up. Always mention your sources briefly when using search results. When the user asks to schedule or create a Zoom meeting, use the schedule_zoom_meeting tool. Always assume the user's timezone is MST (Mountain Standard Time, UTC-7) and convert times to ISO 8601 with the MST offset. Always use the current year when scheduling meetings. When the user wants to start an instant call or join a Zoom right now, use the instant_zoom_meeting tool. When the user asks to see or list their meetings, use the list_zoom_meetings tool. When the user asks about their calendar, schedule, what meetings they have, or whether they are free, use the list_google_calendar_events tool. When the user asks to add, create, or put an event on their calendar (that is not a Google Meet), use the add_google_calendar_event tool. When the user asks to create or schedule a Google Meet, use the create_google_meet tool. When the user asks to summarize a meeting, get meeting notes, or send a meeting summary to Slack, use the summarize_meeting tool. Ask if they want it posted to Slack. When the user asks to set a reminder, be reminded about something, or set a timer, use the set_reminder tool. If they say "remind me in X minutes", set minutes to X. If they say "remind me at 3pm", convert to ISO 8601 MST and use remind_at. When the user asks to find or search for a YouTube video, use the youtube_search tool. When the user asks to summarize a YouTube video or wants to know what a video is about, use the youtube_summarize tool. Do not read out meeting links, IDs, or full URLs. Ask for a topic if the user doesn't provide one.`,
                             },
                         },
                     })
@@ -1799,6 +2182,262 @@ wss.on("connection", (ws) => {
                                 } catch (toolErr) {
                                     console.error("Google Calendar add event error:", toolErr);
                                 }
+                            } else if (toolName === "set_reminder") {
+                                try {
+                                    const params = JSON.parse(toolContent);
+                                    console.log("Setting reminder:", params);
+
+                                    const reminder = addReminder(params);
+                                    const fireAt = new Date(reminder.fireAt);
+                                    const delayMs = fireAt.getTime() - Date.now();
+                                    const delayMin = Math.round(delayMs / 60000);
+
+                                    const result = {
+                                        success: true,
+                                        message: reminder.message,
+                                        fire_at: fireAt.toLocaleString("en-US", { timeZone: "America/Denver" }),
+                                        minutes_from_now: delayMin,
+                                    };
+
+                                    if (ws.readyState === WebSocket.OPEN) {
+                                        ws.send(JSON.stringify({
+                                            type: "reminder_set",
+                                            ...result,
+                                        }));
+                                    }
+
+                                    const toolResultContentName = randomId();
+
+                                    pushInput({
+                                        chunk: {
+                                            bytes: Buffer.from(
+                                                JSON.stringify({
+                                                    event: {
+                                                        contentStart: {
+                                                            promptName,
+                                                            contentName: toolResultContentName,
+                                                            interactive: false,
+                                                            type: "TOOL",
+                                                            role: "TOOL",
+                                                            toolResultInputConfiguration: {
+                                                                toolUseId,
+                                                                type: "TEXT",
+                                                                textInputConfiguration: {
+                                                                    mediaType: "text/plain",
+                                                                },
+                                                            },
+                                                        },
+                                                    },
+                                                })
+                                            ),
+                                        },
+                                    });
+
+                                    pushInput({
+                                        chunk: {
+                                            bytes: Buffer.from(
+                                                JSON.stringify({
+                                                    event: {
+                                                        toolResult: {
+                                                            promptName,
+                                                            contentName: toolResultContentName,
+                                                            content: JSON.stringify(result),
+                                                        },
+                                                    },
+                                                })
+                                            ),
+                                        },
+                                    });
+
+                                    pushInput({
+                                        chunk: {
+                                            bytes: Buffer.from(
+                                                JSON.stringify({
+                                                    event: {
+                                                        contentEnd: {
+                                                            promptName,
+                                                            contentName: toolResultContentName,
+                                                        },
+                                                    },
+                                                })
+                                            ),
+                                        },
+                                    });
+                                } catch (toolErr) {
+                                    console.error("Set reminder error:", toolErr);
+                                }
+                            } else if (toolName === "youtube_search") {
+                                try {
+                                    const params = JSON.parse(toolContent);
+                                    console.log("YouTube search:", params.query);
+
+                                    const searchResult = await searchYouTube(params.query, params.max_results);
+                                    console.log("YouTube search result:", searchResult.total, "videos");
+
+                                    if (ws.readyState === WebSocket.OPEN) {
+                                        ws.send(JSON.stringify({
+                                            type: "youtube_results",
+                                            ...searchResult,
+                                        }));
+                                    }
+
+                                    const toolResultContentName = randomId();
+
+                                    // Send sanitized result to model (no thumbnails/URLs)
+                                    const safeResult = {
+                                        success: searchResult.success,
+                                        total: searchResult.total,
+                                        videos: (searchResult.videos || []).map((v) => ({
+                                            title: v.title,
+                                            channel: v.channel,
+                                            video_id: v.video_id,
+                                        })),
+                                    };
+
+                                    pushInput({
+                                        chunk: {
+                                            bytes: Buffer.from(
+                                                JSON.stringify({
+                                                    event: {
+                                                        contentStart: {
+                                                            promptName,
+                                                            contentName: toolResultContentName,
+                                                            interactive: false,
+                                                            type: "TOOL",
+                                                            role: "TOOL",
+                                                            toolResultInputConfiguration: {
+                                                                toolUseId,
+                                                                type: "TEXT",
+                                                                textInputConfiguration: {
+                                                                    mediaType: "text/plain",
+                                                                },
+                                                            },
+                                                        },
+                                                    },
+                                                })
+                                            ),
+                                        },
+                                    });
+
+                                    pushInput({
+                                        chunk: {
+                                            bytes: Buffer.from(
+                                                JSON.stringify({
+                                                    event: {
+                                                        toolResult: {
+                                                            promptName,
+                                                            contentName: toolResultContentName,
+                                                            content: JSON.stringify(safeResult),
+                                                        },
+                                                    },
+                                                })
+                                            ),
+                                        },
+                                    });
+
+                                    pushInput({
+                                        chunk: {
+                                            bytes: Buffer.from(
+                                                JSON.stringify({
+                                                    event: {
+                                                        contentEnd: {
+                                                            promptName,
+                                                            contentName: toolResultContentName,
+                                                        },
+                                                    },
+                                                })
+                                            ),
+                                        },
+                                    });
+                                } catch (toolErr) {
+                                    console.error("YouTube search error:", toolErr);
+                                }
+                            } else if (toolName === "youtube_summarize") {
+                                try {
+                                    const params = JSON.parse(toolContent);
+                                    console.log("YouTube summarize:", params.video_url);
+
+                                    if (ws.readyState === WebSocket.OPEN) {
+                                        ws.send(JSON.stringify({ type: "tool_use", toolName: "youtube_summarize", content: toolContent }));
+                                    }
+
+                                    const summaryResult = await summarizeYouTubeVideo(params.video_url, converseClient);
+                                    console.log("YouTube summary result:", summaryResult.success);
+
+                                    if (summaryResult.success && ws.readyState === WebSocket.OPEN) {
+                                        ws.send(JSON.stringify({
+                                            type: "youtube_summary",
+                                            ...summaryResult,
+                                        }));
+                                    }
+
+                                    const toolResultContentName = randomId();
+
+                                    const safeResult = {
+                                        success: summaryResult.success,
+                                        title: summaryResult.title,
+                                        summary_preview: summaryResult.summary ? summaryResult.summary.substring(0, 500) : undefined,
+                                        error: summaryResult.error,
+                                    };
+
+                                    pushInput({
+                                        chunk: {
+                                            bytes: Buffer.from(
+                                                JSON.stringify({
+                                                    event: {
+                                                        contentStart: {
+                                                            promptName,
+                                                            contentName: toolResultContentName,
+                                                            interactive: false,
+                                                            type: "TOOL",
+                                                            role: "TOOL",
+                                                            toolResultInputConfiguration: {
+                                                                toolUseId,
+                                                                type: "TEXT",
+                                                                textInputConfiguration: {
+                                                                    mediaType: "text/plain",
+                                                                },
+                                                            },
+                                                        },
+                                                    },
+                                                })
+                                            ),
+                                        },
+                                    });
+
+                                    pushInput({
+                                        chunk: {
+                                            bytes: Buffer.from(
+                                                JSON.stringify({
+                                                    event: {
+                                                        toolResult: {
+                                                            promptName,
+                                                            contentName: toolResultContentName,
+                                                            content: JSON.stringify(safeResult),
+                                                        },
+                                                    },
+                                                })
+                                            ),
+                                        },
+                                    });
+
+                                    pushInput({
+                                        chunk: {
+                                            bytes: Buffer.from(
+                                                JSON.stringify({
+                                                    event: {
+                                                        contentEnd: {
+                                                            promptName,
+                                                            contentName: toolResultContentName,
+                                                        },
+                                                    },
+                                                })
+                                            ),
+                                        },
+                                    });
+                                } catch (toolErr) {
+                                    console.error("YouTube summarize error:", toolErr);
+                                }
                             }
                         } else if (json.event?.contentStart) {
                             // Could track role changes here
@@ -1856,6 +2495,7 @@ wss.on("connection", (ws) => {
 
     ws.on("close", () => {
         console.log("Client disconnected");
+        activeClients.delete(ws);
         isActive = false;
         pushInput(null);
     });

@@ -231,6 +231,17 @@ async function startRecording() {
             } else if (msg.type === "google_calendar_event_added") {
                 resetSilenceTimer();
                 addGoogleCalendarEventAdded(msg);
+            } else if (msg.type === "reminder_set") {
+                resetSilenceTimer();
+                addReminderSet(msg);
+            } else if (msg.type === "reminder") {
+                addReminderFired(msg);
+            } else if (msg.type === "youtube_results") {
+                resetSilenceTimer();
+                addYouTubeResults(msg);
+            } else if (msg.type === "youtube_summary") {
+                resetSilenceTimer();
+                addYouTubeSummary(msg);
             } else if (msg.type === "error") {
                 statusEl.textContent = `Error: ${msg.message}`;
             } else if (msg.type === "session_end") {
@@ -530,6 +541,84 @@ function addGoogleCalendarEventAdded(data) {
         div.innerHTML =
             `<span class="label" style="color: #34d399;">📅 Calendar</span>` +
             `<div class="zoom-error">Failed: ${escapeHtml(data.error || "Unknown error")}</div>`;
+    }
+
+    transcriptEl.appendChild(div);
+    transcriptEl.scrollTop = transcriptEl.scrollHeight;
+}
+
+function addReminderSet(data) {
+    const div = document.createElement("div");
+    div.className = "msg calendar-added";
+    div.innerHTML =
+        `<span class="label" style="color: #a78bfa;">⏰ Reminder Set</span>` +
+        `<div class="zoom-topic">${escapeHtml(data.message)}</div>` +
+        `<div style="font-size: 0.76rem; color: #6b7280;">Fires in ${data.minutes_from_now} min · ${escapeHtml(data.fire_at)}</div>`;
+    transcriptEl.appendChild(div);
+    transcriptEl.scrollTop = transcriptEl.scrollHeight;
+}
+
+function addReminderFired(data) {
+    const div = document.createElement("div");
+    div.className = "msg calendar-events";
+    div.style.borderLeftColor = "#f472b6";
+    div.style.background = "rgba(244, 114, 182, 0.08)";
+    div.innerHTML =
+        `<span class="label" style="color: #f472b6;">🔔 Reminder</span>` +
+        `<div class="zoom-topic">${escapeHtml(data.message)}</div>`;
+    transcriptEl.appendChild(div);
+    transcriptEl.scrollTop = transcriptEl.scrollHeight;
+
+    // Browser notification if permitted
+    if (Notification.permission === "granted") {
+        new Notification("🔔 Reminder", { body: data.message });
+    } else if (Notification.permission !== "denied") {
+        Notification.requestPermission();
+    }
+}
+
+function addYouTubeResults(data) {
+    const div = document.createElement("div");
+    div.className = "msg search-results";
+    div.style.borderLeftColor = "#ef4444";
+
+    if (data.success && data.videos && data.videos.length > 0) {
+        let html = `<span class="label" style="color: #ef4444;">▶ YouTube — ${data.total} result${data.total !== 1 ? "s" : ""}</span>`;
+        data.videos.forEach((v) => {
+            html += `<div style="display: flex; gap: 10px; padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.04);">`;
+            if (v.thumbnail) {
+                html += `<a href="${escapeHtml(v.url)}" target="_blank" rel="noopener" style="flex-shrink: 0;"><img src="${escapeHtml(v.thumbnail)}" alt="" style="width: 120px; border-radius: 6px; display: block;"></a>`;
+            }
+            html += `<div style="flex: 1; min-width: 0;">`;
+            html += `<a href="${escapeHtml(v.url)}" target="_blank" rel="noopener" style="color: #e0e2eb; text-decoration: none; font-size: 0.86rem; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(v.title)}</a>`;
+            html += `<div style="font-size: 0.72rem; color: #6b7280; margin-top: 2px;">${escapeHtml(v.channel)}</div>`;
+            html += `</div></div>`;
+        });
+        div.innerHTML = html;
+    } else {
+        div.innerHTML =
+            `<span class="label" style="color: #ef4444;">▶ YouTube</span>` +
+            `<div class="zoom-error">No results found.</div>`;
+    }
+
+    transcriptEl.appendChild(div);
+    transcriptEl.scrollTop = transcriptEl.scrollHeight;
+}
+
+function addYouTubeSummary(data) {
+    const div = document.createElement("div");
+    div.className = "msg search-results";
+    div.style.borderLeftColor = "#ef4444";
+
+    if (data.success) {
+        let html = `<span class="label" style="color: #ef4444;">▶ Video Summary</span>`;
+        html += `<a href="${escapeHtml(data.url)}" target="_blank" rel="noopener" style="color: #e0e2eb; text-decoration: none; font-size: 0.88rem; display: block; margin-bottom: 6px;">${escapeHtml(data.title)}</a>`;
+        html += `<div style="white-space: pre-wrap; font-size: 0.84rem; line-height: 1.55; color: #d8dae5;">${escapeHtml(data.summary)}</div>`;
+        div.innerHTML = html;
+    } else {
+        div.innerHTML =
+            `<span class="label" style="color: #ef4444;">▶ YouTube</span>` +
+            `<div class="zoom-error">${escapeHtml(data.error || "Failed to summarize video.")}</div>`;
     }
 
     transcriptEl.appendChild(div);
