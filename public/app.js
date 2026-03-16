@@ -264,6 +264,8 @@ async function startRecording() {
             } else if (msg.type === "tool_use") {
                 resetSilenceTimer();
                 assistantTextSeen.clear();
+            } else if (msg.type === "tool_working") {
+                resetSilenceTimer();
                 if (msg.toolName === "schedule_zoom_meeting") {
                     addSystemMessage("📅 Creating Zoom meeting...");
                 } else {
@@ -520,6 +522,11 @@ function addGoogleMeet(data) {
     div.style.borderLeftColor = "#a78bfa";
 
     if (data.success) {
+        // Auto-open the Meet link if it's an instant meeting
+        if (data.auto_join && data.meet_link) {
+            window.open(data.meet_link, "_blank");
+        }
+
         const time = new Date(data.start_time).toLocaleString();
         div.innerHTML =
             `<span class="label" style="color: #a78bfa;">📹 Google Meet Created</span>` +

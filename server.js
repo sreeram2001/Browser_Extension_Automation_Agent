@@ -23,7 +23,7 @@ const wss = new WebSocketServer({ server });
 app.use(express.static(path.join(__dirname, "public")));
 
 const REGION = process.env.AWS_REGION || "us-east-1";
-const MODEL_ID = "amazon.nova-sonic-v1:0";
+const MODEL_ID = "amazon.nova-2-sonic-v1:0";
 const GROUNDING_MODEL_ID = process.env.GROUNDING_MODEL_ID || "us.amazon.nova-premier-v1:0";
 const AWS_PROFILE = process.env.AWS_PROFILE || "uoc";
 const VOICE_ID = process.env.VOICE_ID || "tiffany";
@@ -319,6 +319,27 @@ const GOOGLE_MEET_TOOL = {
                     },
                 },
                 required: ["topic"],
+            }),
+        },
+    },
+};
+
+// Tool definition for creating an instant Google Meet and auto-joining
+const GOOGLE_MEET_INSTANT_TOOL = {
+    toolSpec: {
+        name: "instant_google_meet",
+        description:
+            "Create an instant Google Meet meeting and join it immediately. Use this tool when the user says things like 'start a Google Meet', 'start an instant Google Meet', 'create an instant Meet', 'hop on a Google Meet', 'start a Meet now', or 'join a Google Meet now'. Do NOT use the Zoom instant meeting tool when the user specifically asks for Google Meet.",
+        inputSchema: {
+            json: JSON.stringify({
+                type: "object",
+                properties: {
+                    topic: {
+                        type: "string",
+                        description: "Optional meeting topic. Defaults to 'Instant Meeting'.",
+                    },
+                },
+                required: [],
             }),
         },
     },
@@ -1366,7 +1387,7 @@ wss.on("connection", (ws) => {
                                     mediaType: "application/json",
                                 },
                                 toolConfiguration: {
-                                    tools: [WEB_SEARCH_TOOL, ZOOM_MEETING_TOOL, ZOOM_INSTANT_MEETING_TOOL, ZOOM_LIST_MEETINGS_TOOL, GOOGLE_CALENDAR_LIST_TOOL, GOOGLE_CALENDAR_ADD_TOOL, GOOGLE_MEET_TOOL, SUMMARIZE_MEETING_TOOL, SET_REMINDER_TOOL, YOUTUBE_SEARCH_TOOL, YOUTUBE_SUMMARIZE_TOOL, CREATE_GOOGLE_TASKS_TOOL],
+                                    tools: [WEB_SEARCH_TOOL, ZOOM_MEETING_TOOL, ZOOM_INSTANT_MEETING_TOOL, ZOOM_LIST_MEETINGS_TOOL, GOOGLE_CALENDAR_LIST_TOOL, GOOGLE_CALENDAR_ADD_TOOL, GOOGLE_MEET_TOOL, GOOGLE_MEET_INSTANT_TOOL, SUMMARIZE_MEETING_TOOL, SET_REMINDER_TOOL, YOUTUBE_SEARCH_TOOL, YOUTUBE_SUMMARIZE_TOOL, CREATE_GOOGLE_TASKS_TOOL],
                                     toolChoice: { auto: {} },
                                 },
                             },
@@ -1407,7 +1428,7 @@ wss.on("connection", (ws) => {
                                 promptName,
                                 contentName,
                                 content:
-                                    `You are Sonic, a friendly voice assistant with web search, Zoom meeting, Google Calendar, Google Meet, Google Tasks, reminders, YouTube, and meeting summary capabilities. Your name is Sonic. Whenever the user says "Sonic", they are referring to you — do NOT search the web for "Sonic" or treat it as a query. Never use web_search for anything related to your own name or identity. Today's date is ${new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric", timeZone: "America/Denver" })}. The current time is ${new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", timeZone: "America/Denver" })} MST. The user and you will engage in a spoken dialog exchanging the transcripts of a natural real-time conversation. Keep your responses short, generally two or three sentences for chatty scenarios. When the user asks about current events, news, weather, real-time information, or anything you're unsure about, use the web_search tool to look it up. Always mention your sources briefly when using search results. When the user asks to schedule or create a Zoom meeting, use the schedule_zoom_meeting tool. Always assume the user's timezone is MST (Mountain Standard Time, UTC-7) and convert times to ISO 8601 with the MST offset. Always use the current year when scheduling meetings. When the user wants to start an instant call or join a Zoom right now, use the instant_zoom_meeting tool. When the user asks to see or list their meetings, use the list_zoom_meetings tool. When the user asks about their calendar, schedule, what meetings they have, or whether they are free, use the list_google_calendar_events tool. When the user asks to add, create, or put an event on their calendar (that is not a Google Meet), use the add_google_calendar_event tool. When the user asks to create or schedule a Google Meet, use the create_google_meet tool. When the user asks to summarize a meeting, get meeting notes, or send a meeting summary to Slack, use the summarize_meeting tool. Ask if they want it posted to Slack. When the user asks to set a reminder, be reminded about something, or set a timer, use the set_reminder tool. If they say "remind me in X minutes", set minutes to X. If they say "remind me at 3pm", convert to ISO 8601 MST and use remind_at. When the user asks to find or search for a YouTube video, use the youtube_search tool. When the user asks to summarize a YouTube video or wants to know what a video is about, use the youtube_summarize tool. When the user asks to create tasks, add action items to their task list, turn meeting action items into tasks, or add a to-do, use the create_google_tasks tool. After summarizing a meeting, proactively ask if the user wants to create Google Tasks from the action items. Do not read out meeting links, IDs, or full URLs. Ask for a topic if the user doesn't provide one.`,
+                                    `You are Sonic, a friendly voice assistant with web search, Zoom meeting, Google Calendar, Google Meet, Google Tasks, reminders, YouTube, and meeting summary capabilities. Your name is Sonic. Whenever the user says "Sonic", they are referring to you — do NOT search the web for "Sonic" or treat it as a query. Never use web_search for anything related to your own name or identity. Today's date is ${new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric", timeZone: "America/Denver" })}. The current time is ${new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", timeZone: "America/Denver" })} MST. The user and you will engage in a spoken dialog exchanging the transcripts of a natural real-time conversation. Keep your responses short, generally two or three sentences for chatty scenarios. When the user asks about current events, news, weather, real-time information, or anything you're unsure about, use the web_search tool to look it up. Always mention your sources briefly when using search results. When the user asks to schedule or create a Zoom meeting, use the schedule_zoom_meeting tool. Always assume the user's timezone is MST (Mountain Standard Time, UTC-7) and convert times to ISO 8601 with the MST offset. Always use the current year when scheduling meetings. When the user wants to start an instant call or join a Zoom right now, use the instant_zoom_meeting tool. When the user asks to see or list their meetings, use the list_zoom_meetings tool. When the user asks about their calendar, schedule, what meetings they have, or whether they are free, use the list_google_calendar_events tool. When the user asks to add, create, or put an event on their calendar (that is not a Google Meet), use the add_google_calendar_event tool. When the user asks to create or schedule a Google Meet, use the create_google_meet tool. When the user wants to start an instant Google Meet or hop on a Google Meet right now, use the instant_google_meet tool — do NOT use the Zoom instant meeting tool for this. When the user asks to summarize a meeting, get meeting notes, or send a meeting summary to Slack, use the summarize_meeting tool. Ask if they want it posted to Slack. When the user asks to set a reminder, be reminded about something, or set a timer, use the set_reminder tool. If they say "remind me in X minutes", set minutes to X. If they say "remind me at 3pm", convert to ISO 8601 MST and use remind_at. When the user asks to find or search for a YouTube video, use the youtube_search tool. When the user asks to summarize a YouTube video or wants to know what a video is about, use the youtube_summarize tool. When the user asks to create tasks, add action items to their task list, turn meeting action items into tasks, or add a to-do, use the create_google_tasks tool. After summarizing a meeting, proactively ask if the user wants to create Google Tasks from the action items. Do not read out meeting links, IDs, or full URLs. Ask for a topic if the user doesn't provide one.`,
                             },
                         },
                     })
@@ -1582,6 +1603,13 @@ wss.on("connection", (ws) => {
                                     })
                                 );
                             }
+
+                            // Send keepalive pings while tool executes so client doesn't timeout
+                            const keepalive = setInterval(() => {
+                                if (ws.readyState === WebSocket.OPEN) {
+                                    ws.send(JSON.stringify({ type: "tool_working" }));
+                                }
+                            }, 3000);
 
                             if (toolName === "web_search") {
                                 try {
@@ -2112,6 +2140,93 @@ wss.on("connection", (ws) => {
                                 } catch (toolErr) {
                                     console.error("Google Meet creation error:", toolErr);
                                 }
+                            } else if (toolName === "instant_google_meet") {
+                                try {
+                                    const params = JSON.parse(toolContent);
+                                    console.log("Creating instant Google Meet:", params);
+
+                                    const meetResult = await createGoogleMeet({
+                                        topic: params.topic || "Instant Meeting",
+                                        force: true,
+                                    });
+                                    console.log("Instant Google Meet result:", meetResult);
+
+                                    // Send with auto_join flag so the client opens it
+                                    if (ws.readyState === WebSocket.OPEN) {
+                                        ws.send(JSON.stringify({
+                                            type: "google_meet",
+                                            auto_join: true,
+                                            ...meetResult,
+                                        }));
+                                    }
+
+                                    const toolResultContentName = randomId();
+                                    const safeResult = {
+                                        success: meetResult.success,
+                                        topic: meetResult.topic,
+                                        start_time: meetResult.start_time,
+                                        duration: meetResult.duration,
+                                        error: meetResult.error,
+                                    };
+
+                                    pushInput({
+                                        chunk: {
+                                            bytes: Buffer.from(
+                                                JSON.stringify({
+                                                    event: {
+                                                        contentStart: {
+                                                            promptName,
+                                                            contentName: toolResultContentName,
+                                                            interactive: false,
+                                                            type: "TOOL",
+                                                            role: "TOOL",
+                                                            toolResultInputConfiguration: {
+                                                                toolUseId,
+                                                                type: "TEXT",
+                                                                textInputConfiguration: {
+                                                                    mediaType: "text/plain",
+                                                                },
+                                                            },
+                                                        },
+                                                    },
+                                                })
+                                            ),
+                                        },
+                                    });
+
+                                    pushInput({
+                                        chunk: {
+                                            bytes: Buffer.from(
+                                                JSON.stringify({
+                                                    event: {
+                                                        toolResult: {
+                                                            promptName,
+                                                            contentName: toolResultContentName,
+                                                            content: JSON.stringify(safeResult),
+                                                        },
+                                                    },
+                                                })
+                                            ),
+                                        },
+                                    });
+
+                                    pushInput({
+                                        chunk: {
+                                            bytes: Buffer.from(
+                                                JSON.stringify({
+                                                    event: {
+                                                        contentEnd: {
+                                                            promptName,
+                                                            contentName: toolResultContentName,
+                                                        },
+                                                    },
+                                                })
+                                            ),
+                                        },
+                                    });
+                                } catch (toolErr) {
+                                    console.error("Instant Google Meet error:", toolErr);
+                                }
                             } else if (toolName === "list_google_calendar_events") {
                                 try {
                                     const params = JSON.parse(toolContent);
@@ -2607,6 +2722,8 @@ wss.on("connection", (ws) => {
                                     console.error("YouTube summarize error:", toolErr);
                                 }
                             }
+
+                            clearInterval(keepalive);
                         } else if (json.event?.contentStart) {
                             // Could track role changes here
                         }
