@@ -1,0 +1,22 @@
+[
+  {
+    "question": "How does the Digital Millennium Copyright Act shift the balance between copyright holders and users, particularly in relation to the fair use?",
+    "ground_truth": "The Digital Millennium Copyright Act criminalizes the circumvention of digital protection mechanisms, even when the intent is to exercise legitimate rights under fair use. This creates a structural conflict: users may legally have the right to quote, backup, or use portions of copyrighted material for education or research, but cannot bypass DRM to do so. As a result, the DMCA effectively overrides traditional fair use rights, transferring practical control from users to copyright holders and limiting lawful access in technologically protected environments."
+  },
+  {
+    "question": "Why was Napster found liable for contributory infringement, and how does this case illustrate broader challenges in regulating peer-to-peer networks?",
+    "ground_truth": "Napster was found liable for contributory infringement because it maintained a centralized index that enabled users to locate and share copyrighted music, even though it did not host the files itself. The court ruled that facilitating access to infringing material constituted indirect participation in copyright violation. This case highlights a core regulatory challenge in peer-to-peer systems: decentralization makes enforcement difficult, but any centralized coordination layer (like indexing or discovery services) can become a legal liability, creating tension between enabling efficient information sharing and avoiding infringement."
+  },
+  {
+    "question": "Why is compression essential for digital video transmission, and how do standards like MPEG and JPEG address this challenge?",
+    "ground_truth": "Raw digital video has extremely high data rates due to spatial resolution, color depth, and temporal sampling (e.g., hundreds of Mbps for standard video), making direct transmission impractical over typical networks. JPEG reduces spatial redundancy within individual frames using techniques like transform coding and quantization, exploiting human visual sensitivity differences (luminance vs chrominance). MPEG extends this by also removing temporal redundancy across frames through motion estimation and inter-frame prediction. Together, these methods achieve large compression ratios, enabling feasible storage and streaming."
+  },
+  {
+    "question": "What is the maximum size of a data piece that a TCP entity breaks user data streams into, and what size is typically used in practice?",
+    "ground_truth": "A TCP entity breaks user data streams into pieces that do not exceed 64 KB. In practice, it often uses pieces of 1460 data bytes so they can fit into a single Ethernet frame alongside the IP and TCP headers."
+  },
+  {
+    "question": "Why is it the responsibility of TCP rather than the IP layer to manage retransmissions and reassemble datagrams into the correct order?",
+    "ground_truth": "The IP layer provides no guarantees that datagrams will be delivered properly or in the correct sequence. Because the underlying internetwork is unreliable, TCP must assume the responsibility of timing out and retransmitting lost datagrams, as well as reassembling them into the proper order when they arrive out of sequence."
+  }
+]
