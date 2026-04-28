@@ -4,6 +4,10 @@ Talk to your workday. Meetings, tasks, calendar, and search — handled by voice
 
 A real-time voice assistant powered by [Amazon Nova Sonic v2](https://aws.amazon.com/bedrock/) on Amazon Bedrock. Speak naturally through your browser — Sonic listens, responds with speech, and takes actions on your behalf.
 
+## Demo
+
+Check out the full demo and project details on Devpost: [Sonic — Voice Assistant](https://devpost.com/software/sonic-voice-assistant)
+
 ## Features
 
 - **Voice-to-voice conversation** — Bidirectional audio streaming with Amazon Nova Sonic v2 for natural, real-time spoken dialogue
